@@ -1,0 +1,275 @@
+---
+title: 'Quantum State Encoding with Error Correction'
+description: 'Learn how to encode quantum states using the Steane code, add noise, and perform error correction with tsim'
+---
+
+This tutorial showcases the basic functionality of **tsim** for encoding quantum states and performing error correction.
+
+tsim is a circuit sampler for Clifford+T circuits, based on stabilizer rank decomposition and ZX-calculus techniques. It closely follows the API of Stim and directly uses Stim's circuit format. Unlike Stim, tsim supports `T` and `T_DAG` instructions, enabling simulation of non-Clifford circuits.
+
+## Simple T-Gate Example
+
+Let's start with a simple example that prepares and measures a quantum state using the T gate. This circuit prepares the state:
+
+$$H\,T\,|+\rangle = e^{i\pi/8}\Big[\cos\!\left(\tfrac{\pi}{8}\right)\,|0\rangle \;-\; i\,\sin\!\left(\tfrac{\pi}{8}\right)\,|1\rangle\Big]$$
+
+```python
+from tsim import Circuit
+import numpy as np
+
+c = Circuit(
+    """
+    RX 0
+    T 0
+    H 0
+    M 0
+    """
+)
+c.diagram("timeline-svg", height=150)
+```
+
+<Steps>
+  <Step title="Compile the sampler">
+    To sample from this circuit, we first compile it into a sampler:
+    
+    ```python
+    sampler = c.compile_sampler()
+    ```
+  </Step>
+  
+  <Step title="Sample bitstrings">
+    We can now sample bitstrings from the measurement instructions:
+    
+    ```python
+    sampler.sample(shots=10)
+    ```
+  </Step>
+  
+  <Step title="Estimate probability">
+    Let's run a large number of shots to estimate the probability of measuring `1`:
+    
+    ```python
+    samples = sampler.sample(shots=10_000_000, batch_size=1_000_000)
+    int(np.count_nonzero(samples)) / len(samples)
+    ```
+    
+    As expected, the probability is close to $\sin(\pi/8)^2 \approx 0.1464$.
+  </Step>
+</Steps>
+
+## Detectors and Observables
+
+Next, we consider a more complex example: an encoding circuit for the [[7,1,3]] Steane code. This circuit prepares the logical state:
+
+$$\frac{1}{2}\Big[(1 + e^{i\pi/4})|\bar{0}\rangle + (1 - e^{i\pi/4})|\bar{1}\rangle\Big]$$
+
+```python
+c = Circuit(
+    """
+    RX 6
+    T 6
+    H 6
+    R 0 1 2 3 4 5
+    SQRT_Y_DAG 0 1 2 3 4 5
+    CZ 1 2 3 4 5 6
+    SQRT_Y 6
+    CZ 0 3 2 5 4 6
+    SQRT_Y 2 3 4 5 6
+    CZ 0 1 2 3 4 5
+    SQRT_Y 1 2 4
+    X 3
+    TICK
+    M 0 1 2 3 4 5 6
+    DETECTOR rec[-7] rec[-6] rec[-5] rec[-4]
+    DETECTOR rec[-6] rec[-5] rec[-3] rec[-2]
+    DETECTOR rec[-5] rec[-4] rec[-3] rec[-1]
+    OBSERVABLE_INCLUDE(0) rec[-7] rec[-6] rec[-2]
+    """
+)
+```
+
+### Visualization Methods
+
+tsim supports multiple visualization methods. The default is a ZX diagram, where measurement vertices are annotated with `rec[i]`, and detector and observable vertices are annotated with `det[i]` and `obs[i]`:
+
+```python
+c.diagram();
+```
+
+tsim also wraps Stim's visualization functions:
+
+```python
+c.diagram("timeline-svg", height=350)
+```
+
+### Sampling Detection Events
+
+To sample detection events and logical observables, we can compile a detector sampler, similar to Stim:
+
+```python
+det_sampler = c.compile_detector_sampler(seed=1)
+det_samples, obs_samples = det_sampler.sample(shots=100_000, separate_observables=True)
+print(det_samples[:5])
+print(obs_samples[:5])
+```
+
+Since the circuit is just a logical encoding of the 1-qubit circuit from the beginning of the tutorial, the logical observable should behave exactly like the physical qubit in the first example. Additionally, since the circuit is noiseless, we should not observe any non-zero detection events:
+
+```python
+assert np.count_nonzero(det_samples) == 0
+int(np.count_nonzero(obs_samples)) / len(obs_samples)  # ≈ 0.1464
+```
+
+## Adding Noise
+
+<Note>
+A core capability of tsim is its support for Pauli noise channels.
+</Note>
+
+Let's insert depolarizing channels throughout the circuit. In the ZX diagram, the noise is represented by parametrized vertices with binary parameters `e0`, `e1`, etc. Since a depolarizing channel either applies X, Y, or Z gates, each channel requires two bits (an X vertex and a Z vertex).
+
+```python
+def make_circuit(p):
+    return Circuit(
+        f"""
+        RX 6
+        T 6
+        H 6
+        R 0 1 2 3 4 5
+        TICK
+        SQRT_Y_DAG 0 1 2 3 4 5
+        DEPOLARIZE1({p}) 0 1
+        TICK
+        CZ 1 2 3 4 5 6
+        DEPOLARIZE2({p}) 1 2
+        TICK
+        SQRT_Y 6
+        DEPOLARIZE1({p}) 6
+        TICK
+        CZ 0 3 2 5 4 6
+        TICK
+        SQRT_Y 2 3 4 5 6
+        DEPOLARIZE1({p}) 2 4 6
+        TICK
+        CZ 0 1 2 3 4 5
+        TICK
+        DEPOLARIZE1({p}) 0 1 2 3 4 5 6
+        SQRT_Y 1 2 4
+        X 3
+        TICK
+        M 0 1 2 3 4 5 6
+        DETECTOR rec[-7] rec[-6] rec[-5] rec[-4]
+        DETECTOR rec[-6] rec[-5] rec[-3] rec[-2]
+        DETECTOR rec[-5] rec[-4] rec[-3] rec[-1]
+        OBSERVABLE_INCLUDE(0) rec[-7] rec[-6] rec[-2]
+        """
+    )
+
+c = make_circuit(0.01)
+det_sampler = c.compile_detector_sampler()
+```
+
+Sampling from the noisy circuit, we expect to see some non-zero detector events:
+
+```python
+det_samples, obs_samples = det_sampler.sample(shots=10_000, separate_observables=True)
+print(det_samples[:5], "\nTriggered detection events:", np.count_nonzero(det_samples))
+print(obs_samples[:5])
+```
+
+Due to the noise, the probability of measuring a logical $|\bar{1}\rangle$ deviates from the ideal value of $\sin(\pi/8)^2 \approx 0.1464$.
+
+## Error Detection with Post-Selection
+
+One simple error correction strategy is **post-selection**: we discard any shots where a detector fired (indicating an error occurred). This effectively projects us back to the code space:
+
+```python
+perfect_stabilizers = np.all(det_samples == 0, axis=1)
+post_selected_obs = obs_samples[perfect_stabilizers]
+int(np.count_nonzero(post_selected_obs)) / len(post_selected_obs)
+```
+
+## Error Correction with a Decoder
+
+To actively correct errors, we need a **decoder**. A decoder takes the detector syndrome and predicts whether the observable should be flipped. In this example, we use the [tesseract](https://github.com/quantumlib/tesseract-decoder) decoder:
+
+```python
+from tesseract_decoder import tesseract
+
+config = tesseract.TesseractConfig(dem=c.detector_error_model())
+decoder = config.compile_decoder()
+
+obs_corrected = np.zeros_like(obs_samples)
+for i, det_sample in enumerate(det_samples):
+    flip_obs = decoder.decode(det_sample)
+    obs_corrected[i] = np.logical_xor(obs_samples[i], flip_obs[0])
+
+print("Raw obs.: ", int(np.count_nonzero(obs_samples)) / len(obs_samples))
+print("Corrected:", int(np.count_nonzero(obs_corrected)) / len(obs_corrected))
+```
+
+After correction, the probability of getting a logical $|\bar{1}\rangle$ is close to the ideal value.
+
+## Monte Carlo Simulation with Sinter
+
+tsim is compatible with [sinter](https://github.com/quantumlib/Stim/tree/main/glue/sinter), a tool for performing large Monte Carlo simulations. We can use sinter to sample and decode over a range of physical error rates:
+
+```python
+import sinter
+from tesseract_decoder import TesseractSinterDecoder
+from utils.no_decoder import NoDecoder
+
+tesseract_dec = TesseractSinterDecoder()
+no_dec = NoDecoder()
+
+tasks = [
+    sinter.Task(
+        circuit=make_circuit(noise).cast_to_stim(),
+        json_metadata={"p": noise},
+    )
+    for noise in np.logspace(-3.3, -0.2, 6)
+]
+
+collected_stats = sinter.collect(
+    num_workers=1,
+    tasks=tasks,
+    decoders=["tesseract", "no decoding"],
+    max_shots=1024 * 64,
+    max_errors=1024 * 64,
+    custom_decoders={"tesseract": tesseract_dec, "no decoding": NoDecoder()},
+    start_batch_size=1024 * 64,
+    max_batch_size=1024 * 64,
+)
+```
+
+### Plotting Results
+
+sinter provides convenient plotting tools. Here, we plot the observable flip rate as a function of the physical error rate:
+
+```python
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(1, 1)
+sinter.plot_error_rate(
+    ax=ax,
+    stats=collected_stats,
+    x_func=lambda stats: stats.json_metadata["p"],
+    group_func=lambda stats: stats.decoder,
+)
+ax.loglog()
+ax.set_xlabel("Physical Error Rate")
+ax.set_ylabel(f"Probability of logical $|\\bar{{1}}\\rangle$")
+ax.axhline(np.sin(np.pi / 8) ** 2, color="k", linestyle="--", lw=0.4)
+ax.text(0.1, np.sin(np.pi / 8) ** 2 * 1.01, "$\\sin(\\pi/8)^2$", fontsize=10)
+ax.legend();
+```
+
+We observe that the decoded probability approaches the expected value of $\sin(\pi/8)^2$ much faster than the uncorrected rate.
+
+## Key Takeaways
+
+- tsim extends Stim with support for T gates and other non-Clifford operations
+- You can encode logical qubits using quantum error correction codes like the Steane code
+- tsim supports Pauli noise channels for realistic circuit simulation
+- Post-selection and active error correction can improve output fidelity
+- tsim integrates seamlessly with sinter for Monte Carlo simulations

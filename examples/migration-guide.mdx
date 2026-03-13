@@ -1,0 +1,286 @@
+---
+title: 'Migration Guide from Stim to tsim'
+description: 'Learn the differences between Stim and tsim and how to migrate your existing code'
+---
+
+If you have been using [Stim](https://github.com/quantumlib/Stim), using tsim should feel very similar. In many cases, replacing `stim` with `tsim` should just work.
+
+<Note>
+If you're not yet familiar with Stim, check out these resources:
+- [Stim's getting started notebook](https://github.com/quantumlib/Stim/blob/main/doc/getting_started.ipynb)
+- [Craig Gidney's Stim tutorial on YouTube](https://www.youtube.com/watch?v=sprDaLxPVNI)
+- [Google's course on QEC](https://www.coursera.org/learn/quantum-error-correction#modules)
+- [Stim 101 tutorial](https://www.youtube.com/watch?v=LiT6NDQcOm0)
+</Note>
+
+## Non-Clifford Instructions
+
+The key difference between Stim and tsim is support for **non-Clifford gates**. tsim extends the Stim text format with the following non-Clifford instructions:
+
+- `T` - T gate
+- `T_DAG` - T† gate
+- `R_X(angle)` - Rotation around X axis
+- `R_Y(angle)` - Rotation around Y axis
+- `R_Z(angle)` - Rotation around Z axis
+- `U3(theta, phi, lambda)` - General single-qubit unitary
+
+<Warning>
+Rotation angles are specified in units of π.
+</Warning>
+
+```python
+import tsim
+
+c = tsim.Circuit(
+    """
+    T 0
+    T_DAG 0
+    R_X(0.1) 0
+    R_Y(0.2) 0
+    R_Z(0.3) 0
+    U3(0.1, 0.2, 0.3) 0
+    """
+)
+c.diagram(height=150)
+```
+
+## Detector Reference Samples
+
+There are a few behavioral differences between Stim and tsim.
+
+### Stim Behavior
+
+Stim's detector sampler outputs results **relative to a noiseless reference sample**. In the following circuit, detector and observable bits will always be `False`:
+
+```python
+import stim
+
+circuit_str = """
+    X 0
+    M 0
+    DETECTOR rec[-1]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+    """
+c = stim.Circuit(circuit_str)
+stim_sampler = c.compile_detector_sampler(seed=None)
+samples = stim_sampler.sample(shots=5, append_observables=True)
+print(samples)
+# Output: [[False False]
+#          [False False]
+#          [False False]
+#          [False False]
+#          [False False]]
+```
+
+### tsim Behavior
+
+In tsim, **actual detector and observable bits** are always reported:
+
+```python
+import tsim
+
+c = tsim.Circuit(circuit_str)
+tsim_sampler = c.compile_detector_sampler(seed=0)
+samples = tsim_sampler.sample(shots=5, append_observables=True)
+print(samples)
+# Output: [[True True]
+#          [True True]
+#          [True True]
+#          [True True]
+#          [True True]]
+```
+
+## Batch Size and JIT Compilation
+
+### Batch Size Parameter
+
+tsim's samplers have a `batch_size` argument, which does not exist in Stim. This parameter controls the number of shots sampled in parallel.
+
+<Note>
+To achieve maximum performance, especially when running on a GPU, increase the `batch_size` until VRAM is exhausted.
+</Note>
+
+```python
+tsim_sampler.sample(shots=1_000_000, batch_size=100_000)
+```
+
+When `batch_size` is not specified, it defaults to `shots`.
+
+### Just-in-Time Compilation
+
+tsim uses [JAX](https://github.com/google/jax) just-in-time (JIT) compilation, which is triggered upon first execution of the `sample` function. This means:
+
+- **First call**: Slower (includes compilation time)
+- **Subsequent calls**: Much faster (uses compiled function)
+
+<Warning>
+Recompilation is triggered whenever the `batch_size` changes. Keep the batch size consistent for optimal performance.
+</Warning>
+
+## Visualization Methods
+
+tsim supports a subset of Stim's visualization methods. Since tsim is based on ZX diagrams, it also provides visualization via [PyZX](https://github.com/Quantomatic/pyzx).
+
+### Timeline Diagram
+
+```python
+c = tsim.Circuit(
+    """
+    RX 0 1
+    TICK
+    T 0
+    TICK
+    CNOT 0 1
+    TICK
+    U3(0.1, 0.2, 0.3) 1
+    TICK
+    M 0 1
+    """
+)
+c.diagram("timeline-svg", height=150)
+```
+
+### Timeslice Diagram
+
+```python
+c.diagram("timeslice-svg", height=80, rows=1)
+```
+
+### ZX Diagram (PyZX)
+
+tsim's default visualization shows the circuit as a ZX diagram:
+
+```python
+c.diagram("pyzx")
+```
+
+This is particularly useful for understanding how tsim internally represents and optimizes circuits.
+
+## REPEAT Instructions
+
+tsim does not support `REPEAT` instructions in their native form. Any `REPEAT` instructions will be **automatically flattened**:
+
+```python
+c = tsim.Circuit(
+    """
+    REPEAT 10 {
+        T 0
+    }
+    """
+)
+print(c)
+# Output: T 0
+#         T 0
+#         T 0
+#         ...
+#         T 0
+```
+
+<Note>
+This means tsim can handle circuits with `REPEAT` blocks, but they will be expanded during circuit construction.
+</Note>
+
+## Quick Migration Checklist
+
+<Steps>
+  <Step title="Import statement">
+    Change `import stim` to `import tsim`
+  </Step>
+  
+  <Step title="Circuit construction">
+    Replace `stim.Circuit()` with `tsim.Circuit()`
+  </Step>
+  
+  <Step title="Add non-Clifford gates">
+    Use `T`, `T_DAG`, `R_X`, `R_Y`, `R_Z`, or `U3` gates as needed
+  </Step>
+  
+  <Step title="Adjust detector expectations">
+    Remember that tsim reports actual detector values, not differences from reference
+  </Step>
+  
+  <Step title="Optimize batch size">
+    Add `batch_size` parameter to `sample()` calls for better performance
+  </Step>
+  
+  <Step title="Handle REPEAT blocks">
+    Be aware that `REPEAT` instructions will be flattened
+  </Step>
+</Steps>
+
+## Example: Side-by-Side Comparison
+
+<CodeGroup>
+```python Stim
+import stim
+import numpy as np
+
+# Create circuit
+c = stim.Circuit("""
+    RX 0 1
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-2]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+""")
+
+# Sample
+sampler = c.compile_detector_sampler()
+samples = sampler.sample(shots=1000)
+```
+
+```python tsim
+import tsim
+import numpy as np
+
+# Create circuit (add T gates!)
+c = tsim.Circuit("""
+    RX 0 1
+    T 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-2]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+""")
+
+# Sample with batch_size
+sampler = c.compile_detector_sampler()
+samples = sampler.sample(shots=1000, batch_size=100)
+```
+</CodeGroup>
+
+## Performance Tips
+
+1. **Use larger batch sizes on GPU**: Maximize parallelism by using the largest batch size your GPU memory allows
+2. **Keep batch size constant**: Avoid recompilation by using the same batch size across calls
+3. **Warm up the JIT**: Run a small sample first to trigger compilation, then run your full simulation
+
+```python
+# Warm up JIT compilation
+sampler.sample(shots=10, batch_size=10)
+
+# Now run full simulation (much faster)
+sampler.sample(shots=1_000_000, batch_size=10_000)
+```
+
+## When to Use tsim vs Stim
+
+| Use Case | Recommended Tool |
+|----------|------------------|
+| Clifford-only circuits | Stim (faster) |
+| Circuits with T gates | tsim |
+| Arbitrary rotation gates | tsim |
+| Magic state distillation | tsim |
+| Surface code simulation (Clifford) | Stim |
+| Fault-tolerant T gates | tsim |
+| Very large Clifford circuits | Stim |
+| GPU acceleration | tsim |
+
+## Getting Help
+
+If you encounter issues during migration:
+
+- Check the [tsim documentation](/introduction)
+- Review the [API reference](/api/circuit)
+- Compare with [example notebooks](https://github.com/quantumlib/tsim/tree/main/docs/demos)
+- Open an issue on [GitHub](https://github.com/quantumlib/tsim)

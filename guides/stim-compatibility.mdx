@@ -1,0 +1,347 @@
+---
+title: "Stim Compatibility"
+description: "Understand how tsim relates to Stim and how to migrate existing code"
+---
+
+## Overview
+
+tsim is designed to feel just like [Stim](https://github.com/quantumlib/Stim), the high-performance stabilizer circuit simulator. For many existing Stim scripts, replacing `import stim` with `import tsim` should just work.
+
+This guide explains the compatibility relationship, key differences, and migration strategies.
+
+## API Compatibility
+
+### Supported Stim Features
+
+tsim supports the core Stim API including:
+
+- **Circuit construction**: `Circuit()`, `append()`, `append_from_stim_program_text()`
+- **Circuit properties**: `num_qubits`, `num_measurements`, `num_detectors`, `num_observables`
+- **Sampling**: `compile_sampler()`, `compile_detector_sampler()`, `sample()`
+- **Circuit manipulation**: `copy()`, `flattened()`, `without_noise()`, slicing with `[:]`
+- **Circuit algebra**: `+`, `*`, `+=`, `*=`
+- **Visualization**: `diagram()`
+- **Detector error models**: `detector_error_model()`
+
+### Drop-In Replacement Example
+
+Many Stim scripts work with minimal changes:
+
+<CodeGroup>
+```python Stim
+import stim
+
+circuit = stim.Circuit("""
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+""")
+
+sampler = circuit.compile_detector_sampler()
+samples = sampler.sample(1000)
+```
+
+```python tsim
+import tsim
+
+circuit = tsim.Circuit("""
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+""")
+
+sampler = circuit.compile_detector_sampler()
+samples = sampler.sample(1000)
+```
+</CodeGroup>
+
+## Supported Gates
+
+### All Stim Gates
+
+tsim supports all gates from the [Stim v1.9 Gate Reference](https://github.com/quantumlib/Stim/wiki/Stim-v1.9-Gate-Reference), including:
+
+- **Clifford gates**: H, S, S_DAG, SQRT_X, SQRT_Y, CX, CZ, SWAP, etc.
+- **Measurements**: M, MR, MX, MY, MZ, MPP
+- **Resets**: R, RX, RY, RZ
+- **Noise**: X_ERROR, Y_ERROR, Z_ERROR, DEPOLARIZE1, DEPOLARIZE2, PAULI_CHANNEL_1, etc.
+- **Annotations**: DETECTOR, OBSERVABLE_INCLUDE, TICK, QUBIT_COORDS
+- **Control flow**: REPEAT
+
+### Extended Gate Set
+
+tsim adds support for non-Clifford gates:
+
+```python
+c = tsim.Circuit("""
+    # T gates (π/4 phase)
+    T 0
+    T_DAG 1
+    
+    # Arbitrary rotation gates
+    R_X(0.5) 0    # RX(θ) where θ = 0.5π
+    R_Y(0.25) 1   # RY(θ) where θ = 0.25π
+    R_Z(1.0) 2    # RZ(θ) where θ = π
+    
+    # Universal single-qubit gate
+    U3(0.5, 0.25, 0.125) 3
+""")
+```
+
+<Note>
+In Stim, `S` and `S_DAG` gates can have a `[T]` tag, but they still behave as Clifford gates. In tsim, use explicit `T` and `T_DAG` instructions for non-Clifford T gates.
+</Note>
+
+## Key Differences
+
+### Detector Semantics
+
+<Warning>
+This is the most important difference between Stim and tsim.
+</Warning>
+
+Stim and tsim handle detectors differently:
+
+**Stim**: Reports detector *flips* (XOR with noiseless reference sample)
+**tsim**: Reports actual detector *values*
+
+```python
+import stim
+import tsim
+
+# Circuit with deterministic detector
+program = """
+    X 0
+    M 0
+    DETECTOR rec[-1]
+"""
+
+# Stim reports flips (False = matches reference)
+stim_samples = stim.Circuit(program).compile_detector_sampler().sample(100)
+print(stim_samples[0])  # [False]
+
+# tsim reports actual values (True = detector fired)
+tsim_samples = tsim.Circuit(program).compile_detector_sampler().sample(100)
+print(tsim_samples[0])  # [True]
+```
+
+**Why this matters**: tsim supports non-deterministic detectors and observables (those involving non-Clifford gates), so there's no single "reference sample" to compare against.
+
+**Migration tip**: If you need Stim-style flips, XOR tsim samples with a noiseless reference:
+
+```python
+c = tsim.Circuit(program)
+det_sampler = c.compile_detector_sampler(seed=42)
+
+# Get noiseless reference
+c_noiseless = c.without_noise()
+reference = c_noiseless.compile_detector_sampler(seed=0).sample(1)
+
+# Sample with noise
+samples = det_sampler.sample(1000)
+
+# Compute flips
+flips = samples ^ reference
+```
+
+### Non-Deterministic Observables
+
+tsim allows observables to be non-deterministic:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    T 0      # Non-Clifford gate
+    M 0
+    OBSERVABLE_INCLUDE(0) rec[-1]
+""")
+
+# This is valid in tsim but would fail in Stim
+dem = c.detector_error_model(allow_gauge_detectors=False)
+```
+
+### Batch Size Parameter
+
+tsim's `sample()` method includes a `batch_size` parameter for GPU optimization:
+
+```python
+# tsim with batch size control
+samples = sampler.sample(shots=10000, batch_size=2048)
+
+# Stim (no batch_size parameter)
+samples = sampler.sample(10000)
+```
+
+## Migration Guide
+
+<Steps>
+  <Step title="Update imports">
+    Replace Stim imports with tsim:
+    
+    ```python
+    # Before
+    import stim
+    
+    # After
+    import tsim
+    ```
+  </Step>
+  
+  <Step title="Add non-Clifford gates if needed">
+    Optionally enhance circuits with T gates and rotations:
+    
+    ```python
+    c = tsim.Circuit("""
+        H 0
+        T 0        # Add non-Clifford gates
+        CNOT 0 1
+        M 0 1
+    """)
+    ```
+  </Step>
+  
+  <Step title="Update detector expectations">
+    If you're checking detector values, remember tsim reports actual values, not flips:
+    
+    ```python
+    # Don't assume all-zero samples for noiseless circuits
+    samples = detector_sampler.sample(100)
+    # samples may contain True values even without noise
+    ```
+  </Step>
+  
+  <Step title="Optimize batch size for GPU">
+    Add batch size tuning for better GPU performance:
+    
+    ```python
+    samples = sampler.sample(
+        shots=100000,
+        batch_size=4096  # Tune for your GPU
+    )
+    ```
+  </Step>
+  
+  <Step title="Update error correction pipelines">
+    If using detectors for error correction, adjust for value semantics vs flip semantics as needed.
+  </Step>
+</Steps>
+
+## Interoperability
+
+### Using Both Libraries
+
+You can use Stim and tsim together:
+
+```python
+import stim
+import tsim
+
+# Generate circuit with Stim
+stim_circ = stim.Circuit.generated(
+    "surface_code:rotated_memory_x",
+    distance=3,
+    rounds=5
+)
+
+# Convert to tsim and add non-Clifford gates
+tsim_circ = tsim.Circuit.from_stim_program(stim_circ)
+tsim_circ.append("T", 0)
+
+# Sample with tsim
+sampler = tsim_circ.compile_detector_sampler()
+samples = sampler.sample(1000)
+```
+
+### Converting Between Formats
+
+```python
+# tsim to Stim (loses non-Clifford gates)
+tsim_circ = tsim.Circuit("H 0\nT 0\nM 0")
+stim_circ = tsim_circ.stim_circuit
+
+# Stim to tsim
+stim_circ = stim.Circuit("H 0\nCNOT 0 1\nM 0 1")
+tsim_circ = tsim.Circuit.from_stim_program(stim_circ)
+```
+
+<Warning>
+Converting tsim circuits with T, R_X, R_Y, R_Z, or U3 gates to Stim will replace them with identity gates tagged with the original instruction. The Stim circuit will not preserve the non-Clifford behavior.
+</Warning>
+
+## Feature Comparison Table
+
+| Feature | Stim | tsim |
+|---------|------|------|
+| Clifford gates | ✅ | ✅ |
+| T gates | ❌ | ✅ |
+| Arbitrary rotations | ❌ | ✅ |
+| GPU acceleration | ❌ | ✅ |
+| Pauli noise | ✅ | ✅ |
+| Detector sampling | ✅ | ✅ |
+| Detector semantics | Flips | Values |
+| Non-deterministic observables | ❌ | ✅ |
+| Tableau simulator | ✅ | ❌ |
+| Max qubits (pure Clifford) | 1000s | 100s |
+| Max qubits (with T gates) | N/A | Depends on T count |
+
+## When to Use Each
+
+### Use Stim when:
+
+- Working with purely Clifford circuits
+- Need maximum performance for stabilizer circuits
+- Require Tableau simulation or specific Stim features
+- Scaling to 1000+ qubits
+
+### Use tsim when:
+
+- Need non-Clifford gates (T, rotations)
+- Want GPU acceleration
+- Working with circuits that have manageable T-gate count
+- Need non-deterministic detectors/observables
+
+## Troubleshooting
+
+### "T gate count too high"
+
+tsim's performance degrades with many T gates:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    T 0 1 2 3 4 5 6 7 8 9  # 10 T gates
+    M 0 1 2 3 4 5 6 7 8 9
+""")
+
+print(f"T count: {c.tcount()}")  # Monitor T count
+# If >20-30, consider decomposition or alternative approaches
+```
+
+### Different samples than Stim
+
+Remember detector value vs flip semantics:
+
+```python
+# If you expect Stim behavior, XOR with reference
+reference = c.without_noise().compile_detector_sampler().sample(1)
+tsim_flips = tsim_samples ^ reference
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="book" href="/guides/basic-usage">
+    Learn core tsim workflows
+  </Card>
+  <Card title="GPU Acceleration" icon="microchip" href="/guides/gpu-acceleration">
+    Set up JAX for GPU support
+  </Card>
+  <Card title="Non-Clifford Gates" icon="atom" href="/concepts/non-clifford-gates">
+    Understand T gates and rotations
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/circuit">
+    Full API documentation
+  </Card>
+</CardGroup>

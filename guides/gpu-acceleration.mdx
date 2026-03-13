@@ -1,0 +1,398 @@
+---
+title: "GPU Acceleration"
+description: "Configure JAX for GPU support and optimize performance with tsim"
+---
+
+## Overview
+
+tsim uses [JAX](https://github.com/google/jax) for high-performance numerical computation with automatic GPU acceleration. This guide covers installation, configuration, and optimization techniques for maximum performance.
+
+## Installation
+
+### CPU-Only Installation
+
+The basic installation includes CPU support:
+
+```bash
+pip install bloqade-tsim
+```
+
+### GPU Installation (CUDA 12)
+
+For NVIDIA GPUs with CUDA 12:
+
+```bash
+pip install "bloqade-tsim[cuda12]"
+```
+
+### GPU Installation (CUDA 13)
+
+For NVIDIA GPUs with CUDA 13 (JAX 0.6.0+):
+
+```bash
+pip install "bloqade-tsim[cuda13]"
+```
+
+<Note>
+GPU installation includes larger dependencies (several GB). Ensure you have sufficient disk space and a compatible NVIDIA GPU.
+</Note>
+
+## Verifying GPU Access
+
+Check if JAX can see your GPU:
+
+```python
+import jax
+
+# List available devices
+print(f"Devices: {jax.devices()}")
+
+# Check default backend
+print(f"Default backend: {jax.default_backend()}")
+
+# Expected output with GPU:
+# Devices: [cuda(id=0)]
+# Default backend: gpu
+```
+
+If you see `cpu` instead of `gpu`, verify your CUDA installation and JAX GPU package.
+
+## Performance Optimization
+
+### Batch Size Tuning
+
+The `batch_size` parameter controls parallel sampling. Larger batches better utilize GPU resources:
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    H 0
+    T 0
+    CNOT 0 1
+    M 0 1
+""")
+
+sampler = c.compile_sampler(seed=42)
+
+# Small batch (underutilizes GPU)
+samples = sampler.sample(shots=100000, batch_size=128)
+
+# Larger batch (better GPU utilization)
+samples = sampler.sample(shots=100000, batch_size=4096)
+
+# Very large batch (maximize GPU usage)
+samples = sampler.sample(shots=100000, batch_size=16384)
+```
+
+<Steps>
+  <Step title="Start with default">
+    Begin with `batch_size=1024` as a baseline.
+  </Step>
+  
+  <Step title="Increase until VRAM fills">
+    Gradually increase: 2048, 4096, 8192, 16384, etc. Monitor GPU memory usage with `nvidia-smi`.
+  </Step>
+  
+  <Step title="Find the sweet spot">
+    The optimal batch size fills GPU memory without causing out-of-memory errors. Performance plateaus once GPU is fully utilized.
+  </Step>
+  
+  <Step title="Consider multiple GPUs">
+    JAX can automatically distribute batches across multiple GPUs if available.
+  </Step>
+</Steps>
+
+### Monitoring GPU Usage
+
+Use `nvidia-smi` to monitor GPU utilization:
+
+```bash
+# Watch GPU usage in real-time
+watch -n 1 nvidia-smi
+```
+
+Look for:
+- **GPU Utilization**: Should be near 100% during sampling
+- **Memory Usage**: Should be high but not causing OOM errors
+- **Temperature**: Should remain within safe limits
+
+### Compilation and JIT
+
+tsim uses JAX's Just-In-Time (JIT) compilation. The first `sample()` call compiles the circuit, which can take a few seconds. Subsequent calls are much faster:
+
+```python
+import time
+
+sampler = c.compile_sampler(seed=42)
+
+# First call: includes JIT compilation time
+start = time.time()
+samples1 = sampler.sample(shots=1000, batch_size=1024)
+print(f"First sample: {time.time() - start:.2f}s")  # ~2-5 seconds
+
+# Subsequent calls: compiled and cached
+start = time.time()
+samples2 = sampler.sample(shots=1000, batch_size=1024)
+print(f"Second sample: {time.time() - start:.2f}s")  # ~0.1 seconds
+```
+
+<Tip>
+Reuse compiled samplers when sampling multiple times from the same circuit to avoid recompilation overhead.
+</Tip>
+
+## JAX Configuration
+
+### Memory Management
+
+JAX preallocates GPU memory by default. Control this behavior:
+
+```python
+import os
+
+# Preallocate 90% of GPU memory
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'true'
+os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
+
+import tsim  # Import after setting environment
+```
+
+Or disable preallocation for shared GPU usage:
+
+```python
+import os
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
+
+import tsim
+```
+
+### Precision Settings
+
+JAX uses float32 by default. For higher precision (at the cost of performance):
+
+```python
+import jax
+from jax import config
+
+# Enable 64-bit precision
+config.update("jax_enable_x64", True)
+
+import tsim
+```
+
+### Device Selection
+
+Force CPU execution (useful for debugging):
+
+```python
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+
+import tsim
+```
+
+Select specific GPU:
+
+```python
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Use GPU 0
+
+import tsim
+```
+
+## Benchmarking Performance
+
+Compare CPU vs GPU performance:
+
+```python
+import tsim
+import time
+import numpy as np
+
+def benchmark(backend, batch_size):
+    import os
+    os.environ['JAX_PLATFORMS'] = backend
+    
+    # Force reimport to apply backend change
+    import importlib
+    import jax
+    importlib.reload(jax)
+    
+    c = tsim.Circuit("""
+        H 0 1 2 3
+        T 0 1 2 3
+        CNOT 0 1
+        CNOT 2 3
+        M 0 1 2 3
+    """)
+    
+    sampler = c.compile_sampler(seed=42)
+    
+    # Warmup (JIT compilation)
+    _ = sampler.sample(shots=100, batch_size=batch_size)
+    
+    # Benchmark
+    start = time.time()
+    samples = sampler.sample(shots=100000, batch_size=batch_size)
+    elapsed = time.time() - start
+    
+    rate = 100000 / elapsed
+    print(f"{backend.upper()}: {elapsed:.2f}s ({rate:.0f} samples/sec)")
+    return elapsed
+
+# Compare backends
+cpu_time = benchmark('cpu', batch_size=1024)
+gpu_time = benchmark('gpu', batch_size=8192)
+speedup = cpu_time / gpu_time
+print(f"\nGPU speedup: {speedup:.1f}x")
+```
+
+## Scaling Considerations
+
+### Circuit Complexity
+
+GPU benefits depend on circuit properties:
+
+- **T-gate count**: More T gates → larger compilation graphs → more GPU benefit
+- **Qubit count**: More qubits → larger state space → more GPU benefit  
+- **Measurement count**: More measurements → more autoregressive steps → more GPU benefit
+
+```python
+c = tsim.Circuit("""
+    H 0 1 2 3 4 5 6 7 8 9
+    T 0 1 2 3 4 5 6 7 8 9  # 10 T gates
+    CNOT 0 1
+    CNOT 2 3
+    CNOT 4 5
+    M 0 1 2 3 4 5 6 7 8 9
+""")
+
+print(f"T gates: {c.tcount()}")
+print(f"Measurements: {c.num_measurements}")
+
+# Circuits with more T gates see larger GPU speedup
+sampler = c.compile_sampler()
+samples = sampler.sample(shots=10000, batch_size=4096)
+```
+
+### Memory Limitations
+
+GPU memory limits the maximum batch size:
+
+```python
+try:
+    # May cause OOM on small GPUs
+    samples = sampler.sample(shots=1000000, batch_size=32768)
+except RuntimeError as e:
+    if "out of memory" in str(e).lower():
+        print("Reduce batch_size or upgrade GPU")
+        # Fallback to smaller batch
+        samples = sampler.sample(shots=1000000, batch_size=8192)
+```
+
+## Troubleshooting
+
+### "No GPU found"
+
+<AccordionGroup>
+  <Accordion title="Verify CUDA installation">
+    ```bash
+    # Check NVIDIA driver
+    nvidia-smi
+    
+    # Check CUDA version
+    nvcc --version
+    ```
+    
+    Install appropriate CUDA toolkit if missing.
+  </Accordion>
+  
+  <Accordion title="Reinstall JAX with CUDA support">
+    ```bash
+    pip uninstall jax jaxlib
+    pip install "bloqade-tsim[cuda12]"  # or cuda13
+    ```
+  </Accordion>
+  
+  <Accordion title="Check JAX device visibility">
+    ```python
+    import jax
+    print(jax.devices())
+    # Should show: [cuda(id=0)]
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### "Out of Memory" Errors
+
+Reduce batch size or free GPU memory:
+
+```python
+# Clear JAX cache
+import jax
+jax.clear_caches()
+
+# Reduce batch size
+samples = sampler.sample(shots=100000, batch_size=2048)  # Down from 8192
+```
+
+### Slow Compilation
+
+Circuits with many T gates take longer to compile:
+
+```python
+import time
+
+c = tsim.Circuit("""...""")
+print(f"T count: {c.tcount()}")
+
+start = time.time()
+sampler = c.compile_sampler(seed=42)
+compile_time = time.time() - start
+print(f"Compilation: {compile_time:.2f}s")
+
+if compile_time > 10:
+    print("Warning: High T count leads to slow compilation")
+```
+
+<Warning>
+Circuits with >30 T gates may take minutes to compile. Consider circuit decomposition strategies to reduce T count.
+</Warning>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Batch Size" icon="layer-group">
+    Start with 1024, increase to 4096-16384 for GPUs. Monitor VRAM usage.
+  </Card>
+  
+  <Card title="Reuse Samplers" icon="recycle">
+    Compile once, sample many times to amortize compilation overhead.
+  </Card>
+  
+  <Card title="Monitor T Count" icon="hashtag">
+    Keep T-gate count under 30 for reasonable compilation times.
+  </Card>
+  
+  <Card title="Profile First" icon="chart-line">
+    Benchmark CPU vs GPU for your specific circuits before deploying.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="book" href="/guides/basic-usage">
+    Learn core tsim workflows
+  </Card>
+  <Card title="Noise Models" icon="wave-pulse" href="/guides/noise-models">
+    Add realistic noise to circuits
+  </Card>
+  <Card title="Stabilizer Rank" icon="gauge-high" href="/concepts/stabilizer-rank">
+    Understand performance implications of non-Clifford gates
+  </Card>
+  <Card title="JAX Documentation" icon="external-link" href="https://jax.readthedocs.io">
+    Learn more about JAX configuration
+  </Card>
+</CardGroup>

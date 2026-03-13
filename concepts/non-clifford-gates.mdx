@@ -1,0 +1,422 @@
+---
+title: 'Non-Clifford Gates'
+description: 'Understanding the gates that make tsim unique'
+---
+
+## Why Non-Clifford Gates Matter
+
+The **Clifford group** is a special set of quantum gates that can be simulated efficiently - this is the foundation of Stim's performance. Clifford gates include:
+
+- **Pauli gates**: X, Y, Z
+- **Hadamard**: H  
+- **Phase gate**: S (π/2 Z-rotation)
+- **CNOT** and other multi-qubit Clifford gates
+- **Measurements** in the computational basis
+
+While Clifford circuits are important for quantum error correction, they are **not universal** for quantum computation. By the Gottesman-Knill theorem, Clifford circuits can be efficiently simulated classically, so they cannot provide quantum advantage.
+
+<Info>
+**Universal quantum computation** requires at least one non-Clifford gate. The standard choice is the **T gate**, making Clifford+T circuits universal. tsim extends this to support arbitrary single-qubit rotations.
+</Info>
+
+tsim bridges the gap between Stim (Clifford-only, extremely fast) and full state vector simulators (all gates, limited to ~30 qubits) by efficiently handling circuits with a moderate number of non-Clifford gates.
+
+## Supported Non-Clifford Gates
+
+tsim supports the following non-Clifford instructions beyond Stim's gate set:
+
+<CardGroup cols={2}>
+  <Card title="T and T†" icon="t">
+    The canonical non-Clifford gate (π/4 Z-rotation)
+  </Card>
+  <Card title="R_X, R_Y, R_Z" icon="rotate">
+    Arbitrary single-qubit rotations around each axis
+  </Card>
+  <Card title="U3" icon="cube">
+    General single-qubit unitary gate
+  </Card>
+</CardGroup>
+
+### T and T_DAG Gates
+
+The **T gate** applies a π/4 phase rotation:
+
+$$
+T = \begin{pmatrix} 1 & 0 \\ 0 & e^{i\pi/4} \end{pmatrix}
+$$
+
+The **T† gate** (T-dagger, also written `T_DAG`) is its inverse:
+
+$$
+T^\dagger = \begin{pmatrix} 1 & 0 \\ 0 & e^{-i\pi/4} \end{pmatrix}
+$$
+
+#### Usage
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    H 0
+    T 0 1 2      # Apply T to qubits 0, 1, 2
+    CNOT 0 1
+    T_DAG 1      # Apply T† to qubit 1
+    M 0 1 2
+""")
+
+sampler = c.compile_sampler()
+samples = sampler.sample(shots=1000)
+```
+
+<Note>
+Internally, T and T_DAG are encoded as tagged S gates in the Stim circuit representation (`circuit.py:134-138`), then converted to Z-spiders with phase ±π/4 during parsing.
+</Note>
+
+#### Relation to Other Gates
+
+The T gate is related to the Clifford S gate:
+
+$$
+S = T^2 = \begin{pmatrix} 1 & 0 \\ 0 & i \end{pmatrix}
+$$
+
+So two T gates in sequence equal an S gate (which is Clifford). However, a single T gate is non-Clifford and requires stabilizer rank decomposition.
+
+### Rotation Gates: R_X, R_Y, R_Z
+
+These gates perform rotations around the X, Y, and Z axes by an angle θ = α·π, where α is the parameter you provide:
+
+$$
+\begin{align*}
+R_X(\alpha) &= e^{-i\alpha\pi X/2} = \begin{pmatrix} \cos(\alpha\pi/2) & -i\sin(\alpha\pi/2) \\ -i\sin(\alpha\pi/2) & \cos(\alpha\pi/2) \end{pmatrix} \\
+\\
+R_Y(\alpha) &= e^{-i\alpha\pi Y/2} = \begin{pmatrix} \cos(\alpha\pi/2) & -\sin(\alpha\pi/2) \\ \sin(\alpha\pi/2) & \cos(\alpha\pi/2) \end{pmatrix} \\
+\\
+R_Z(\alpha) &= e^{-i\alpha\pi Z/2} = \begin{pmatrix} e^{-i\alpha\pi/2} & 0 \\ 0 & e^{i\alpha\pi/2} \end{pmatrix}
+\end{align*}
+$$
+
+<Info>
+**Parameter convention**: The argument α represents the rotation angle **in units of π**. So `R_Z(0.5)` means a rotation by 0.5π = π/2.
+
+This matches common quantum computing conventions where angles are given as multiples of π.
+</Info>
+
+#### Usage
+
+```python
+c = tsim.Circuit("""
+    R_X(0.5) 0     # Rotate qubit 0 around X by π/2 (equivalent to √X)
+    R_Y(0.25) 1    # Rotate qubit 1 around Y by π/4
+    R_Z(1.0) 2     # Rotate qubit 2 around Z by π (equivalent to Z gate)
+    R_Z(0.5) 3     # Rotate qubit 3 around Z by π/2 (equivalent to S gate)
+    M 0 1 2 3
+""")
+```
+
+You can also use the programmatic API:
+
+```python
+c = tsim.Circuit()
+c.append("R_X", 0, 0.5)      # R_X(π/2) on qubit 0
+c.append("R_Y", 1, 0.25)     # R_Y(π/4) on qubit 1
+c.append("R_Z", [2, 3], 0.5) # R_Z(π/2) on qubits 2 and 3
+c.append("M", [0, 1, 2, 3])
+```
+
+#### Special Cases
+
+Some rotation angles correspond to Clifford gates:
+
+| Rotation | α value | Equivalent Clifford Gate |
+|----------|---------|-------------------------|
+| R_Z(π/2) | 0.5 | S (phase gate) |
+| R_Z(π) | 1.0 | Z (Pauli Z) |
+| R_Z(3π/2) | 1.5 | S† |
+| R_X(π) | 1.0 | X (Pauli X) |
+| R_Y(π) | 1.0 | Y (Pauli Y) |
+
+When you use these special angles, tsim's ZX-calculus simplification will often recognize and simplify them, but you can also use the native Clifford gates directly for potentially better performance.
+
+#### Implementation Details
+
+In the ZX-graph representation (`instructions.py:120-137`):
+
+```python
+def r_z(b: GraphRepresentation, qubit: int, phase: Fraction) -> None:
+    """Apply R_Z rotation gate with given phase (in units of π)."""
+    z_phase(b, qubit, phase)           # Add Z-spider with phase α
+    b.graph.scalar.add_phase(-phase / 2)  # Correct global phase
+
+def r_x(b: GraphRepresentation, qubit: int, phase: Fraction) -> None:
+    """Apply R_X rotation gate with given phase (in units of π)."""
+    x_phase(b, qubit, phase)           # Add X-spider with phase α
+    b.graph.scalar.add_phase(-phase / 2)  # Correct global phase
+
+def r_y(b: GraphRepresentation, qubit: int, phase: Fraction) -> None:
+    """Apply R_Y rotation gate with given phase (in units of π)."""
+    h_yz(b, qubit)    # Basis change: Z-basis → Y-basis
+    r_z(b, qubit, phase)
+    h_yz(b, qubit)    # Basis change: Y-basis → Z-basis
+```
+
+Rotations are represented as colored spiders (Z-spiders for R_Z, X-spiders for R_X) with the corresponding phase, plus a global phase correction.
+
+### U3 Gate: Universal Single-Qubit Unitary
+
+The **U3 gate** is a general parameterized single-qubit gate that can represent any single-qubit unitary:
+
+$$
+U_3(\theta, \phi, \lambda) = \begin{pmatrix} 
+  \cos(\theta\pi/2) & -e^{i\lambda\pi}\sin(\theta\pi/2) \\ 
+  e^{i\phi\pi}\sin(\theta\pi/2) & e^{i(\phi+\lambda)\pi}\cos(\theta\pi/2)
+\end{pmatrix}
+$$
+
+All three parameters (θ, φ, λ) are specified as **multiples of π**.
+
+#### Usage
+
+```python
+c = tsim.Circuit("""
+    U3(0.5, 0.25, 0.125) 0   # θ=π/2, φ=π/4, λ=π/8
+    M 0
+""")
+```
+
+Or programmatically:
+
+```python
+c = tsim.Circuit()
+c.append("U3", 0, [0.5, 0.25, 0.125])  # Pass three angles as a list
+c.append("M", 0)
+```
+
+<Note>
+The U3 gate is equivalent to the composition:
+$$
+U_3(\theta, \phi, \lambda) = R_Z(\phi) \cdot R_Y(\theta) \cdot R_Z(\lambda)
+$$
+up to a global phase. This is how it's implemented internally (`instructions.py:139-151`).
+</Note>
+
+#### Why U3?
+
+The U3 parameterization is popular because:
+
+✅ **Universal**: Any single-qubit unitary can be expressed as U3(θ, φ, λ) for some choice of parameters
+
+✅ **Standard**: Used by many quantum computing platforms (IBM Qiskit, Cirq, etc.)
+
+✅ **Efficient**: Only three real parameters needed (vs. 4 complex amplitudes for a general 2×2 unitary)
+
+You can use U3 to import circuits from other frameworks that use this parameterization.
+
+#### Example: Common Gates as U3
+
+<AccordionGroup>
+  <Accordion title="Hadamard as U3">
+    $$H = U_3(1, 0, 1)$$
+    ```python
+    c.append("U3", 0, [1.0, 0.0, 1.0])  # θ=π, φ=0, λ=π
+    ```
+  </Accordion>
+  
+  <Accordion title="T gate as U3">
+    $$T = U_3(0, 0, 0.25)$$
+    ```python
+    c.append("U3", 0, [0.0, 0.0, 0.25])  # θ=0, φ=0, λ=π/4
+    ```
+  </Accordion>
+  
+  <Accordion title="Arbitrary state preparation">
+    To prepare the state $|\psi\rangle = \cos(\alpha)|0\rangle + e^{i\beta}\sin(\alpha)|1\rangle$:
+    ```python
+    theta = 2 * alpha / np.pi  # Convert α to multiples of π/2
+    lam = beta / np.pi         # Convert β to multiples of π
+    c.append("U3", 0, [theta, 0.0, lam])
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Encoding and Internal Representation
+
+### Tagged Stim Instructions
+
+Since Stim doesn't natively support non-Clifford gates, tsim encodes them using **tags** on Clifford gates (`circuit.py:133-156`):
+
+```python
+def append(self, name: str, targets, arg=None, *, tag=""):
+    if name == "T":
+        name = "S"          # Use S as the carrier gate
+        tag = "T"           # Mark it as actually being T
+    elif name == "R_Z":
+        name = "I"          # Use identity as carrier
+        tag = f"R_Z(theta={arg}*pi)"  # Encode angle in tag
+    # ... similar for R_X, R_Y, U3 ...
+    
+    self._stim_circ.append(name=name, targets=targets, arg=arg, tag=tag)
+```
+
+The tag is a string annotation that Stim preserves but ignores. tsim's parser (`parse.py`) reads these tags to reconstruct the actual non-Clifford gates.
+
+### ZX-Graph Representation  
+
+During parsing, tagged gates are converted to ZX-graph elements (`instructions.py`):
+
+- **T gate** → Z-spider with phase π/4
+- **R_Z(α)** → Z-spider with phase α  
+- **R_X(α)** → X-spider with phase α
+- **R_Y(α)** → Sequence of H_YZ, R_Z(α), H_YZ
+- **U3(θ,φ,λ)** → Sequence R_Z(λ), R_Y(θ), R_Z(φ)
+
+These representations enable ZX-calculus simplification and stabilizer rank decomposition.
+
+## Performance Considerations
+
+### T-Count is Critical
+
+The **T-count** (number of T and T† gates) is the primary factor determining compilation time and sampling performance. This is because:
+
+- Each T gate potentially doubles the number of stabilizer components
+- Worst-case stabilizer rank is $2^{n_T}$ where $n_T$ is the T-count
+- ZX-calculus simplification can reduce this, but not eliminate the exponential scaling
+
+You can check your circuit's T-count:
+
+```python
+tcount = circuit.tcount()
+print(f"This circuit has {tcount} T gates")
+```
+
+<Info>
+**Rule of thumb**: tsim handles circuits with < 30 T gates efficiently. Beyond ~50 T gates, compilation becomes very slow and memory-intensive.
+</Info>
+
+### Rotation Angles Matter
+
+For rotation gates (R_X, R_Y, R_Z, U3), the angle affects decomposition complexity:
+
+- **Clifford angles** (multiples of π/2): Trivial, no decomposition needed
+- **Dyadic angles** (multiples of π/2^k): Finite stabilizer rank, efficient
+- **Non-dyadic angles**: May require more complex decomposition
+
+<Note>
+Angles that are exact fractions (in the Python `Fraction` representation) tend to decompose more efficiently. If you're using floating-point angles, tsim will convert them to fractions with a finite denominator.
+</Note>
+
+### Optimization Tips
+
+<AccordionGroup>
+  <Accordion title="Cancel adjacent T gates">
+    If you have T followed by T_DAG on the same qubit, they cancel:
+    ```python
+    # Inefficient:
+    c.append("T", 0)
+    c.append("T_DAG", 0)  # These cancel!
+    
+    # Better: Remove both gates
+    ```
+    However, tsim's ZX-calculus simplification will catch this automatically during `zx.full_reduce()`, so it's not critical.
+  </Accordion>
+  
+  <Accordion title="Merge adjacent rotations">
+    Consecutive rotations on the same axis add:
+    ```python
+    # Inefficient:
+    c.append("R_Z", 0, 0.125)  # π/8 rotation
+    c.append("R_Z", 0, 0.125)  # Another π/8 rotation
+    
+    # Better:
+    c.append("R_Z", 0, 0.25)   # Single π/4 rotation
+    ```
+    Again, ZX-calculus simplification handles this via spider fusion, but starting with a simpler circuit helps.
+  </Accordion>
+  
+  <Accordion title="Use Clifford gates when possible">
+    If your rotation angle is a Clifford angle, use the native gate:
+    ```python
+    # Less efficient:
+    c.append("R_Z", 0, 0.5)  # π/2 rotation
+    
+    # More efficient:  
+    c.append("S", 0)         # Native S gate (also π/2 Z-rotation)
+    ```
+    Native Clifford gates don't require stabilizer rank decomposition.
+  </Accordion>
+  
+  <Accordion title="Structure matters">
+    Circuits with structured T gate placement (e.g., quantum error correction circuits) often have lower effective stabilizer rank than random T gate placement:
+    
+    - T gates that commute with surrounding Clifford gates can sometimes be merged
+    - T gates at the end of the circuit may be optimized away if followed by measurements
+    - Symmetry in T gate placement can lead to cancellations during decomposition
+  </Accordion>
+</AccordionGroup>
+
+## Limitations
+
+### No Multi-Qubit Non-Clifford Gates
+
+tsim currently only supports **single-qubit non-Clifford gates**. Multi-qubit non-Clifford gates like:
+
+- Controlled-T (CCZ gate)
+- Toffoli (CCX gate, though it's actually universal with Clifford gates)
+- Controlled-rotation gates
+
+are not directly supported. However, you can decompose them into single-qubit rotations and CNOTs:
+
+```python
+# Decomposition of controlled-S (CZ · (I ⊗ S))
+def controlled_s(circuit, control, target):
+    circuit.append("CZ", [control, target])  # Clifford
+    circuit.append("S", target)              # Clifford
+    # This is actually still Clifford!
+
+# For controlled-T, you need:
+def controlled_t(circuit, control, target):
+    circuit.append("CNOT", [control, target])
+    circuit.append("T_DAG", target)          # Non-Clifford!
+    circuit.append("CNOT", [control, target])
+    circuit.append("T", control)             # Non-Clifford!
+    circuit.append("T", target)              # Non-Clifford!
+```
+
+<Note>
+A controlled-T gate decomposes into 3 T gates using standard techniques, so it triples your T-count. More generally, an n-controlled-T gate requires O(n) T gates.
+</Note>
+
+### Approximate vs. Exact Angles
+
+When you provide floating-point angles, tsim converts them to fractions:
+
+```python
+c.append("R_Z", 0, 0.333333)  # Will be converted to a fraction like 333333/1000000
+```
+
+This fraction will be used in the exact arithmetic during evaluation. If your angle is irrational (like π/3 for a true 60° rotation), you'll need to approximate it as a fraction.
+
+For best results, use exact fractions when possible:
+
+```python
+from fractions import Fraction
+
+c.append("R_Z", 0, float(Fraction(1, 3)))  # Exactly π/3
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Stabilizer Rank" icon="layer-group" href="/concepts/stabilizer-rank">
+    Learn how non-Clifford gates are decomposed internally
+  </Card>
+  <Card title="GPU Acceleration" icon="gauge" href="/guides/gpu-acceleration">
+    Optimize your circuits for best performance
+  </Card>
+  <Card title="Circuit API" icon="code" href="/api/circuit">
+    Complete API reference for Circuit class
+  </Card>
+  <Card title="Stim Compatibility" icon="link" href="/guides/stim-compatibility">
+    Understand the relationship between tsim and Stim
+  </Card>
+</CardGroup>

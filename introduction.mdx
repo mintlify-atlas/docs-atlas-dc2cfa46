@@ -1,0 +1,96 @@
+---
+title: "Introduction"
+description: "GPU-accelerated quantum circuit sampler using ZX-calculus stabilizer rank decomposition"
+---
+
+<div style={{
+  background: 'linear-gradient(135deg, #b21e1e 0%, #e59f82 100%)',
+  padding: '3rem 2rem',
+  borderRadius: '12px',
+  marginBottom: '2rem',
+  color: 'white'
+}}>
+  <h1 style={{ 
+    color: 'white', 
+    fontSize: '2.5rem', 
+    fontWeight: 700,
+    marginBottom: '1rem',
+    fontFamily: 'Times New Roman, serif'
+  }}>
+    tsim
+  </h1>
+  <p style={{ 
+    fontSize: '1.25rem', 
+    color: 'white',
+    marginBottom: '0',
+    fontFamily: 'Times New Roman, serif'
+  }}>
+    A universal quantum circuit sampler that feels just like Stim, but supports non-Clifford gates.
+  </p>
+</div>
+
+## What is tsim?
+
+tsim is a GPU-accelerated quantum circuit simulator designed for fast sampling from Clifford+T circuits with Pauli noise. Built on ZX-calculus stabilizer rank decomposition, tsim extends the familiar Stim API with support for non-Clifford gates including T, T_DAG, and arbitrary rotation gates (R_X, R_Y, R_Z, U3).
+
+The simulator leverages JAX for efficient compilation and can handle hundreds of qubits, provided the circuit doesn't contain too many non-Clifford instructions.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Stim-Compatible API" icon="code" href="/guides/stim-compatibility">
+    Drop-in replacement for many Stim workflows with extended gate support
+  </Card>
+  <Card title="GPU Acceleration" icon="microchip" href="/guides/gpu-acceleration">
+    JAX-based compilation for fast sampling on CPU and GPU
+  </Card>
+  <Card title="Non-Clifford Gates" icon="atom" href="/concepts/non-clifford-gates">
+    Support for T, T_DAG, R_X, R_Y, R_Z, and U3 gates
+  </Card>
+  <Card title="Noise Simulation" icon="wave-pulse" href="/guides/noise-models">
+    Pauli noise channels and detector error models
+  </Card>
+</CardGroup>
+
+## Quick Example
+
+```python
+import tsim
+
+# Create a circuit with non-Clifford gates
+c = tsim.Circuit("""
+    RX 0
+    T 0
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+""")
+
+# Compile and sample
+detector_sampler = c.compile_detector_sampler()
+samples = detector_sampler.sample(shots=1000)
+```
+
+## How It Works
+
+tsim uses **stabilizer rank decomposition** together with **ZX-calculus simplification rules** to efficiently simulate quantum circuits. The approach, based on [Sutcliffe and Kissinger (2025)](https://arxiv.org/abs/2403.06777), decomposes circuits into manageable components that can be sampled efficiently.
+
+Just like Stim, tsim compiles circuits into measurement or detector samplers. These samplers manage a contiguous data structure optimized for efficient batch sampling on both CPU and GPU.
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install tsim with pip or uv
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first quantum circuit in minutes
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/overview">
+    Understand ZX-calculus and stabilizer rank
+  </Card>
+  <Card title="API Reference" icon="terminal" href="/api/circuit">
+    Explore the complete API
+  </Card>
+</CardGroup>

@@ -1,0 +1,919 @@
+---
+title: Circuit
+description: Quantum circuit wrapper around stim.Circuit with non-Clifford gate support
+---
+
+## Overview
+
+The `Circuit` class is a thin wrapper around `stim.Circuit` that adds support for non-Clifford gates like T gates and arbitrary rotations. Circuits are constructed using Stim program text and support all standard Clifford operations plus:
+
+- T and T_DAG gates (implemented via parametric rotations)
+- Arbitrary rotations: R_X, R_Y, R_Z with angle parameters
+- U3 gates with three rotation angles
+
+## Constructor
+
+### `__init__`
+
+```python
+Circuit(stim_program_text: str = "")
+```
+
+Initialize a circuit from Stim program text.
+
+<ParamField path="stim_program_text" type="str" default="">
+  Stim program text to parse. Supports shorthand syntax. If empty, creates an empty circuit.
+</ParamField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    T 0
+    CNOT 0 1
+    M 0 1
+''')
+```
+
+## Class Methods
+
+### `from_stim_program`
+
+```python
+@classmethod
+from_stim_program(cls, stim_circuit: stim.Circuit) -> Circuit
+```
+
+Create a Circuit from a stim.Circuit object.
+
+<ParamField path="stim_circuit" type="stim.Circuit">
+  The stim circuit to wrap.
+</ParamField>
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit instance wrapping the provided stim circuit.
+</ResponseField>
+
+**Example:**
+
+```python
+import stim
+import tsim
+
+stim_circ = stim.Circuit('''
+    H 0
+    CNOT 0 1
+''')
+
+circuit = tsim.Circuit.from_stim_program(stim_circ)
+```
+
+### `from_file`
+
+```python
+@classmethod
+from_file(cls, filename: str) -> Circuit
+```
+
+Create a Circuit from a file.
+
+<ParamField path="filename" type="str">
+  The filename to read the circuit from.
+</ParamField>
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit instance containing the circuit from the file.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit.from_file("my_circuit.stim")
+```
+
+## Instance Methods
+
+### `append`
+
+```python
+append(
+    name: Union[str, stim.CircuitInstruction, stim.CircuitRepeatBlock, stim.Circuit],
+    targets: Union[int, stim.GateTarget, stim.PauliString, Iterable[...]] = (),
+    arg: Union[float, Iterable[float], None] = None,
+    *,
+    tag: str = ""
+) -> None
+```
+
+Append an operation into the circuit.
+
+<ParamField path="name" type="str | stim.CircuitInstruction | stim.CircuitRepeatBlock | stim.Circuit">
+  The name of the operation's gate (e.g. "H", "M", "CNOT", "T", "R_X", "U3") or a stim instruction/block.
+</ParamField>
+
+<ParamField path="targets" type="int | stim.GateTarget | stim.PauliString | Iterable" default="()">
+  The objects operated on by the gate. Can be a single qubit index or an iterable of targets.
+</ParamField>
+
+<ParamField path="arg" type="float | Iterable[float] | None" default="None">
+  The parens arguments for the gate. For rotation gates (R_X, R_Y, R_Z), a single angle in units of π. For U3 gates, three angles [theta, phi, lambda] in units of π.
+</ParamField>
+
+<ParamField path="tag" type="str" default="">
+  A customizable string attached to the instruction.
+</ParamField>
+
+**Examples:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit()
+
+# Append Clifford gates
+circuit.append("H", 0)
+circuit.append("CNOT", [0, 1])
+
+# Append T gate
+circuit.append("T", 0)
+
+# Append rotation gates
+circuit.append("R_X", 0, 0.5)  # π/2 rotation
+circuit.append("R_Y", 1, 0.25)  # π/4 rotation
+
+# Append U3 gate
+circuit.append("U3", 0, [0.5, 0.25, 0.125])  # theta, phi, lambda
+
+# Append measurements
+circuit.append("M", [0, 1])
+```
+
+### `append_from_stim_program_text`
+
+```python
+append_from_stim_program_text(stim_program_text: str) -> None
+```
+
+Append operations described by a STIM format program into the circuit.
+
+<ParamField path="stim_program_text" type="str">
+  Stim program text to append. Supports the same shorthand syntax as the constructor.
+</ParamField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit()
+circuit.append_from_stim_program_text('''
+    H 0 1 2
+    CNOT 0 1 1 2
+    M 0 1 2
+''')
+```
+
+### `copy`
+
+```python
+copy() -> Circuit
+```
+
+Create a copy of this circuit.
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit instance that is a copy of this one.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit1 = tsim.Circuit("H 0\nCNOT 0 1")
+circuit2 = circuit1.copy()
+```
+
+### `flattened`
+
+```python
+flattened() -> Circuit
+```
+
+Return a copy of the circuit with all repeat blocks expanded.
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit instance with all loops unrolled.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    REPEAT 10 {
+        H 0
+        CNOT 0 1
+    }
+''')
+
+flat = circuit.flattened()
+print(len(flat))  # 20 instructions
+```
+
+### `without_noise`
+
+```python
+without_noise() -> Circuit
+```
+
+Return a copy of the circuit with all noise removed.
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit instance with noise operations removed.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    X_ERROR(0.01) 0
+    CNOT 0 1
+''')
+
+clean = circuit.without_noise()
+```
+
+### `without_annotations`
+
+```python
+without_annotations() -> Circuit
+```
+
+Return a copy of the circuit with all detector and observable annotations removed.
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit instance without DETECTOR and OBSERVABLE_INCLUDE instructions.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    M 0
+    DETECTOR rec[-1]
+''')
+
+bare = circuit.without_annotations()
+```
+
+### `inverse`
+
+```python
+inverse() -> Circuit
+```
+
+Return the inverse of the circuit.
+
+<ResponseField name="returns" type="Circuit">
+  A new Circuit that is the inverse of this circuit. Properly handles inversion of non-Clifford gates including T gates and parametric rotations (R_X, R_Y, R_Z, U3).
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    T 0
+    CNOT 0 1
+''')
+
+inv = circuit.inverse()
+```
+
+### `pop`
+
+```python
+pop(index: int = -1) -> Union[stim.CircuitInstruction, stim.CircuitRepeatBlock]
+```
+
+Pop an operation from the end of the circuit, or at the given index.
+
+<ParamField path="index" type="int" default="-1">
+  The index to pop from. Defaults to -1 (end of circuit).
+</ParamField>
+
+<ResponseField name="returns" type="stim.CircuitInstruction | stim.CircuitRepeatBlock">
+  The popped instruction or repeat block.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nCNOT 0 1\nM 0 1")
+last = circuit.pop()  # Removes and returns M 0 1
+```
+
+### `approx_equals`
+
+```python
+approx_equals(other: object, *, atol: float) -> bool
+```
+
+Check if a circuit is approximately equal to another circuit.
+
+<ParamField path="other" type="Circuit | stim.Circuit">
+  The circuit to compare to this one.
+</ParamField>
+
+<ParamField path="atol" type="float">
+  The absolute error tolerance. The maximum amount each probability may have been perturbed by.
+</ParamField>
+
+<ResponseField name="returns" type="bool">
+  True if the circuits are approximately equal up to the given tolerance, otherwise False.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+c1 = tsim.Circuit("X_ERROR(0.1) 0")
+c2 = tsim.Circuit("X_ERROR(0.101) 0")
+
+assert c1.approx_equals(c2, atol=0.01)
+```
+
+### `compile_m2d_converter`
+
+```python
+compile_m2d_converter(
+    *,
+    skip_reference_sample: bool = False
+) -> stim.CompiledMeasurementsToDetectionEventsConverter
+```
+
+Create a measurement-to-detection-event converter for the circuit.
+
+<ParamField path="skip_reference_sample" type="bool" default="False">
+  When True, the reference sample is initialized to all-zeroes instead of being collected from the circuit.
+</ParamField>
+
+<ResponseField name="returns" type="stim.CompiledMeasurementsToDetectionEventsConverter">
+  An initialized converter that can compute detection events and observable flips from raw measurement data.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+import numpy as np
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+''')
+
+converter = circuit.compile_m2d_converter()
+```
+
+### `detector_error_model`
+
+```python
+detector_error_model(
+    *,
+    decompose_errors: bool = False,
+    flatten_loops: bool = False,
+    allow_gauge_detectors: bool = False,
+    approximate_disjoint_errors: bool = False,
+    ignore_decomposition_failures: bool = False,
+    block_decomposition_from_introducing_remnant_edges: bool = False
+) -> stim.DetectorErrorModel
+```
+
+Return a stim.DetectorErrorModel describing the error processes in the circuit.
+
+<ParamField path="decompose_errors" type="bool" default="False">
+  When True, attempt to decompose composite error mechanisms into simpler errors. Not supported by tsim.
+</ParamField>
+
+<ParamField path="flatten_loops" type="bool" default="False">
+  When True, the output will not contain any repeat blocks.
+</ParamField>
+
+<ParamField path="allow_gauge_detectors" type="bool" default="False">
+  When False, verify that detectors are deterministic under noiseless execution.
+</ParamField>
+
+<ParamField path="approximate_disjoint_errors" type="bool | float" default="False">
+  When True, treat disjoint error components as independent. Can also be a probability threshold.
+</ParamField>
+
+<ParamField path="ignore_decomposition_failures" type="bool" default="False">
+  When True, undecomposed errors are inserted into the output instead of causing errors.
+</ParamField>
+
+<ParamField path="block_decomposition_from_introducing_remnant_edges" type="bool" default="False">
+  Requires both components to exist elsewhere before allowing decomposition.
+</ParamField>
+
+<ResponseField name="returns" type="stim.DetectorErrorModel">
+  A detector error model describing how errors propagate to detectors and observables.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    X_ERROR(0.01) 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+''')
+
+dem = circuit.detector_error_model(approximate_disjoint_errors=True)
+```
+
+### `diagram`
+
+```python
+diagram(
+    type: Literal["pyzx", "pyzx-dets", "pyzx-meas", "timeline-svg", "timeslice-svg"] = "timeline-svg",
+    tick: int | range | None = None,
+    filter_coords: Iterable[Iterable[float] | stim.DemTarget] = ((),),
+    rows: int | None = None,
+    height: float | None = None,
+    width: float | None = None,
+    **kwargs: Any
+) -> Any
+```
+
+Return a diagram of the circuit.
+
+<ParamField path="type" type="str" default="timeline-svg">
+  The type of diagram: "pyzx" (ZX diagram), "pyzx-dets" (ZX for detectors), "pyzx-meas" (ZX for measurements), "timeline-svg" (operations over time), or "timeslice-svg" (operations between TICKs).
+</ParamField>
+
+<ParamField path="tick" type="int | range | None" default="None">
+  Required for timeslice diagrams. Specifies which TICK instruction or range to display.
+</ParamField>
+
+<ParamField path="filter_coords" type="Iterable" default="((),)">
+  Filter what to include in the diagram (detector coordinates, DemTargets, etc).
+</ParamField>
+
+<ParamField path="rows" type="int | None" default="None">
+  Number of rows for multi-piece diagrams.
+</ParamField>
+
+<ParamField path="height" type="float | None" default="None">
+  Optional height for the rendered diagram.
+</ParamField>
+
+<ParamField path="width" type="float | None" default="None">
+  Optional width for the rendered diagram.
+</ParamField>
+
+<ResponseField name="returns" type="Any">
+  An object whose __str__ method returns the diagram. May define _repr_html_ for notebook display.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    T 0 1
+    M 0 1
+''')
+
+# Timeline diagram
+svg = circuit.diagram(type="timeline-svg")
+
+# ZX diagram
+zx = circuit.diagram(type="pyzx")
+```
+
+### `to_tensor`
+
+```python
+to_tensor() -> Any
+```
+
+Convert circuit to tensor representation.
+
+<ResponseField name="returns" type="numpy.ndarray">
+  The tensor representation of the circuit's quantum state.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nCNOT 0 1")
+tensor = circuit.to_tensor()
+```
+
+### `to_matrix`
+
+```python
+to_matrix() -> Any
+```
+
+Convert circuit to matrix representation.
+
+<ResponseField name="returns" type="numpy.ndarray">
+  The unitary matrix representing the circuit.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nCNOT 0 1")
+matrix = circuit.to_matrix()
+```
+
+### `tcount`
+
+```python
+tcount() -> int
+```
+
+Count the number of T gates in the circuit.
+
+<ResponseField name="returns" type="int">
+  The T-count of the circuit.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nT 0\nT 1\nCNOT 0 1")
+print(circuit.tcount())  # 2
+```
+
+### `get_graph`
+
+```python
+get_graph() -> BaseGraph
+```
+
+Construct the ZX graph representation of the circuit.
+
+<ResponseField name="returns" type="pyzx_param.graph.base.BaseGraph">
+  The ZX graph representing the circuit.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nT 0\nCNOT 0 1")
+graph = circuit.get_graph()
+```
+
+### `get_sampling_graph`
+
+```python
+get_sampling_graph(sample_detectors: bool = False) -> BaseGraph
+```
+
+Get a ZX graph that can be used to compute probabilities.
+
+<ParamField path="sample_detectors" type="bool" default="False">
+  If True, sample detectors and observables instead of measurements.
+</ParamField>
+
+<ResponseField name="returns" type="pyzx_param.graph.base.BaseGraph">
+  A ZX graph for sampling, constructed by doubling the circuit and composing with its adjoint.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+''')
+
+graph = circuit.get_sampling_graph(sample_detectors=False)
+```
+
+### `compile_sampler`
+
+```python
+compile_sampler(*, seed: int | None = None) -> CompiledMeasurementSampler
+```
+
+Compile circuit into a measurement sampler.
+
+<ParamField path="seed" type="int | None" default="None">
+  Random seed for the sampler. If None, a random seed will be generated.
+</ParamField>
+
+<ResponseField name="returns" type="CompiledMeasurementSampler">
+  A compiled sampler that can efficiently sample measurements from the circuit.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+''')
+
+sampler = circuit.compile_sampler(seed=42)
+samples = sampler.sample(shots=1000)
+```
+
+### `compile_detector_sampler`
+
+```python
+compile_detector_sampler(*, seed: int | None = None) -> CompiledDetectorSampler
+```
+
+Compile circuit into a detector sampler.
+
+<ParamField path="seed" type="int | None" default="None">
+  Random seed for the sampler. If None, a random seed will be generated.
+</ParamField>
+
+<ResponseField name="returns" type="CompiledDetectorSampler">
+  A compiled sampler that can efficiently sample detectors and observables.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+''')
+
+sampler = circuit.compile_detector_sampler(seed=42)
+detectors = sampler.sample(shots=1000)
+```
+
+### `cast_to_stim`
+
+```python
+cast_to_stim() -> stim.Circuit
+```
+
+Return self with type cast to stim.Circuit.
+
+<ResponseField name="returns" type="stim.Circuit">
+  The circuit cast to stim.Circuit type for compatibility with stim functions.
+</ResponseField>
+
+## Properties
+
+### `stim_circuit`
+
+```python
+@property
+stim_circuit -> stim.Circuit
+```
+
+Return a copy of the underlying stim circuit.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nCNOT 0 1")
+stim_circ = circuit.stim_circuit
+```
+
+### `num_measurements`
+
+```python
+@property
+num_measurements -> int
+```
+
+Count the number of bits produced when sampling the circuit's measurements.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nM 0 1 2")
+print(circuit.num_measurements)  # 3
+```
+
+### `num_detectors`
+
+```python
+@property
+num_detectors -> int
+```
+
+Count the number of bits produced when sampling the circuit's detectors.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    M 0
+    DETECTOR rec[-1]
+    DETECTOR rec[-1]
+''')
+print(circuit.num_detectors)  # 2
+```
+
+### `num_observables`
+
+```python
+@property
+num_observables -> int
+```
+
+Count the number of bits produced when sampling the circuit's logical observables.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    M 0
+    OBSERVABLE_INCLUDE(0) rec[-1]
+''')
+print(circuit.num_observables)  # 1
+```
+
+### `num_qubits`
+
+```python
+@property
+num_qubits -> int
+```
+
+Count the number of qubits used when simulating the circuit.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0 1 2 3")
+print(circuit.num_qubits)  # 4
+```
+
+### `num_ticks`
+
+```python
+@property
+num_ticks -> int
+```
+
+Count the number of TICK instructions executed when running the circuit.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    TICK
+    CNOT 0 1
+    TICK
+''')
+print(circuit.num_ticks)  # 2
+```
+
+## Operators
+
+### Addition (`+`, `+=`)
+
+Concatenate circuits together.
+
+**Example:**
+
+```python
+import tsim
+
+c1 = tsim.Circuit("H 0")
+c2 = tsim.Circuit("CNOT 0 1")
+
+# Create new circuit
+c3 = c1 + c2
+
+# In-place addition
+c1 += c2
+```
+
+### Multiplication (`*`, `*=`)
+
+Repeat a circuit multiple times.
+
+**Example:**
+
+```python
+import tsim
+
+c1 = tsim.Circuit("H 0\nCNOT 0 1")
+
+# Create new repeated circuit
+c2 = c1 * 5
+c3 = 3 * c1
+
+# In-place repetition
+c1 *= 10
+```
+
+### Indexing (`[]`)
+
+Access individual instructions or slices.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nCNOT 0 1\nM 0 1")
+
+# Get single instruction
+instr = circuit[0]  # H 0
+
+# Get slice
+subcircuit = circuit[0:2]  # H 0 and CNOT 0 1
+```
+
+### Equality (`==`)
+
+Check if two circuits are exactly equal.
+
+**Example:**
+
+```python
+import tsim
+
+c1 = tsim.Circuit("H 0\nCNOT 0 1")
+c2 = tsim.Circuit("H 0\nCNOT 0 1")
+
+assert c1 == c2
+```
+
+### Length (`len()`)
+
+Get the number of instructions in the circuit.
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit("H 0\nCNOT 0 1\nM 0 1")
+print(len(circuit))  # 3
+```

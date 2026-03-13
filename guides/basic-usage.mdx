@@ -1,0 +1,317 @@
+---
+title: "Basic Usage"
+description: "Learn how to create circuits, compile samplers, and get started with tsim"
+---
+
+## Overview
+
+tsim provides a familiar API that mirrors Stim while extending it with support for non-Clifford gates. This guide covers the fundamental workflow for creating circuits, compiling samplers, and generating samples.
+
+## Creating Circuits
+
+### From Program Text
+
+The most common way to create a circuit is from Stim-compatible program text:
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    H 0
+    CNOT 0 1
+    M 0 1
+""")
+```
+
+### Adding Non-Clifford Gates
+
+tsim extends Stim's gate set with T gates and arbitrary rotations:
+
+```python
+c = tsim.Circuit("""
+    # T gates
+    T 0
+    T_DAG 1
+    
+    # Rotation gates (angle specified as multiples of pi)
+    R_X(0.5) 0      # Rotate by pi/2 around X
+    R_Y(0.25) 1     # Rotate by pi/4 around Y
+    R_Z(1.0) 2      # Rotate by pi around Z
+    
+    # Universal single-qubit gate
+    U3(0.5, 0.25, 0.125) 3
+    
+    H 0 1
+    CNOT 0 1
+    M 0 1 2 3
+""")
+```
+
+### Building Circuits Programmatically
+
+You can also build circuits by appending instructions:
+
+```python
+c = tsim.Circuit()
+c.append("H", 0)
+c.append("T", 0)
+c.append("CNOT", [0, 1])
+c.append("R_X", 2, arg=0.5)  # Angle as argument
+c.append("M", [0, 1, 2])
+```
+
+### From Stim Circuits
+
+Convert existing Stim circuits to tsim:
+
+```python
+import stim
+
+stim_circuit = stim.Circuit("""
+    H 0 1
+    CZ 0 1
+    M 0 1
+""")
+
+c = tsim.Circuit.from_stim_program(stim_circuit)
+```
+
+## Compiling Samplers
+
+### Measurement Sampler
+
+To sample measurement outcomes, compile a measurement sampler:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    CNOT 0 1
+    T 0
+    M 0 1
+""")
+
+# Compile with optional seed for reproducibility
+sampler = c.compile_sampler(seed=42)
+
+# Sample measurement outcomes
+samples = sampler.sample(shots=1000, batch_size=1024)
+print(samples.shape)  # (1000, 2) - 1000 shots, 2 measurements
+```
+
+<Note>
+The `batch_size` parameter controls how many samples are processed in parallel. When using a GPU, increase this until VRAM is fully utilized for maximum performance.
+</Note>
+
+### Detector Sampler
+
+For quantum error correction workflows, use detector samplers:
+
+```python
+c = tsim.Circuit("""
+    X 0
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+""")
+
+detector_sampler = c.compile_detector_sampler(seed=42)
+
+# Sample detectors only
+det_samples = detector_sampler.sample(shots=1000)
+
+# Sample detectors and observables separately
+det_samples, obs_samples = detector_sampler.sample(
+    shots=1000,
+    separate_observables=True
+)
+```
+
+## Working with Samples
+
+### Sample Format
+
+Samples are returned as NumPy arrays with dtype `bool`:
+
+```python
+samples = sampler.sample(shots=5)
+print(samples)
+# Output:
+# [[False  True]
+#  [True  False]
+#  [False False]
+#  [True   True]
+#  [False  True]]
+```
+
+### Bit-Packed Samples
+
+For memory efficiency with large sample sets, use bit packing:
+
+```python
+samples = detector_sampler.sample(
+    shots=10000,
+    bit_packed=True
+)
+# Samples are packed into uint8 arrays
+```
+
+### Observable Ordering
+
+Control where observables appear in the output:
+
+```python
+# Observables at the end (default)
+samples = detector_sampler.sample(shots=100, append_observables=True)
+
+# Observables at the beginning
+samples = detector_sampler.sample(shots=100, prepend_observables=True)
+
+# Observables separated
+det, obs = detector_sampler.sample(shots=100, separate_observables=True)
+```
+
+## Circuit Inspection
+
+### Properties
+
+Inspect circuit properties before sampling:
+
+```python
+print(f"Qubits: {c.num_qubits}")
+print(f"Measurements: {c.num_measurements}")
+print(f"Detectors: {c.num_detectors}")
+print(f"Observables: {c.num_observables}")
+print(f"T gates: {c.tcount()}")
+```
+
+### Visualization
+
+Generate circuit diagrams:
+
+```python
+# Timeline diagram (default)
+diagram = c.diagram("timeline-svg")
+
+# ZX-calculus graph
+diagram = c.diagram("pyzx")
+
+# Detector sampling graph
+diagram = c.diagram("pyzx-dets")
+```
+
+## Circuit Manipulation
+
+### Copying and Modifying
+
+```python
+# Create a copy
+c2 = c.copy()
+
+# Flatten repeat blocks
+c_flat = c.flattened()
+
+# Remove noise
+c_noiseless = c.without_noise()
+
+# Remove detector annotations
+c_no_dets = c.without_annotations()
+```
+
+### Combining Circuits
+
+```python
+# Concatenate circuits
+c_combined = c1 + c2
+
+# In-place append
+c1 += c2
+
+# Repeat a circuit
+c_repeated = c * 10
+```
+
+### Inverting Circuits
+
+```python
+# Get the inverse circuit
+c_inv = c.inverse()
+
+# Compose with inverse (should give identity)
+c_identity = c + c_inv
+```
+
+## Performance Considerations
+
+<Steps>
+  <Step title="Adjust batch size">
+    For GPU acceleration, set `batch_size` to maximize VRAM usage. Start with 1024 and increase until you see diminishing returns or memory errors.
+  </Step>
+  
+  <Step title="Monitor T-gate count">
+    Circuit compilation time grows exponentially with the number of T gates. Use `c.tcount()` to monitor this.
+  </Step>
+  
+  <Step title="Reuse compiled samplers">
+    Compilation can be expensive. If sampling multiple times with the same circuit, reuse the compiled sampler:
+    
+    ```python
+    sampler = c.compile_sampler(seed=42)
+    samples1 = sampler.sample(1000)
+    samples2 = sampler.sample(1000)  # Reuse compiled sampler
+    ```
+  </Step>
+  
+  <Step title="Use appropriate sampler type">
+    Use measurement samplers for general sampling and detector samplers only when you need detector/observable outcomes.
+  </Step>
+</Steps>
+
+## Common Patterns
+
+### Repeatability with Seeds
+
+```python
+# Same seed produces same samples
+sampler1 = c.compile_sampler(seed=42)
+sampler2 = c.compile_sampler(seed=42)
+
+assert np.array_equal(
+    sampler1.sample(100),
+    sampler2.sample(100)
+)
+```
+
+### Reading Circuits from Files
+
+```python
+c = tsim.Circuit.from_file("my_circuit.stim")
+sampler = c.compile_sampler()
+samples = sampler.sample(shots=1000)
+```
+
+### Converting to/from Stim
+
+```python
+# Get underlying Stim circuit
+stim_circ = c.stim_circuit
+
+# Type cast for Stim functions
+stim_typed = c.cast_to_stim()
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Stim Compatibility" icon="link" href="/guides/stim-compatibility">
+    Learn about differences from Stim and migration tips
+  </Card>
+  <Card title="GPU Acceleration" icon="microchip" href="/guides/gpu-acceleration">
+    Configure JAX for GPU support and optimize performance
+  </Card>
+  <Card title="Detectors & Observables" icon="magnifying-glass" href="/guides/detectors-observables">
+    Work with quantum error correction primitives
+  </Card>
+  <Card title="Noise Models" icon="wave-pulse" href="/guides/noise-models">
+    Add realistic noise to your circuits
+  </Card>
+</CardGroup>

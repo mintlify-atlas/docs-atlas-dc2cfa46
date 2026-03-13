@@ -1,0 +1,323 @@
+---
+title: 'Stabilizer Rank Decomposition'
+description: 'How tsim handles non-Clifford gates efficiently'
+---
+
+## The Challenge of Non-Clifford Gates
+
+Clifford circuits (containing only gates like H, S, CNOT, and measurements) can be simulated efficiently using the **stabilizer formalism**. This is the foundation of Stim's impressive performance - it can simulate thousands of qubits in Clifford circuits.
+
+However, universal quantum computation requires **non-Clifford gates** like the T gate or arbitrary rotation gates. These gates break the special structure that makes Clifford simulation efficient.
+
+<Info>
+The T gate applies a π/4 Z-axis rotation:
+
+$$
+T = \begin{pmatrix} 1 & 0 \\ 0 & e^{i\pi/4} \end{pmatrix}
+$$
+
+It's the canonical example of a non-Clifford gate because Clifford+T circuits are universal for quantum computation.
+</Info>
+
+tsim handles non-Clifford gates using **stabilizer rank decomposition**, which expresses non-Clifford circuits as sums of Clifford circuits that can each be simulated efficiently.
+
+## What is Stabilizer Rank?
+
+The **stabilizer rank** of a quantum state $|\psi\rangle$ is the minimum number of stabilizer states needed to express it:
+
+$$
+|\psi\rangle = \sum_{i=1}^{\chi} c_i |\phi_i\rangle
+$$
+
+where each $|\phi_i\rangle$ is a stabilizer state (can be prepared by a Clifford circuit from $|0\rangle^{\otimes n}$) and $\chi$ is the stabilizer rank.
+
+<Note>
+**Key insight**: If a state has stabilizer rank $\chi$, then sampling from measurements of that state can be done by:
+1. Computing the measurement probability from each of the $\chi$ stabilizer components
+2. Combining these probabilities according to the weights $|c_i|^2$
+
+Each stabilizer component can be handled efficiently using Clifford circuit techniques!
+</Note>
+
+### Stabilizer Rank of Common States
+
+- **Computational basis states** $|0\rangle, |1\rangle$: rank 1 (they are stabilizer states)
+- **Hadamard basis states** $|+\rangle, |-\rangle$: rank 1 (can be prepared by Clifford circuits)
+- **T-gate output** $T|+\rangle$: rank 2 (requires non-Clifford preparation)
+- **n T-gates on product state**: rank ≤ $2^n$ (exponential in T-count)
+
+## The Bravyi-Smith-Smolin (BSS) Decomposition
+
+The core of tsim's approach is the **BSS decomposition** for magic states. A "magic state" is the output of applying a T gate to $|+\rangle$:
+
+$$
+|T\rangle = T|+\rangle = \frac{1}{\sqrt{2}}(|0\rangle + e^{i\pi/4}|1\rangle)
+$$
+
+The BSS decomposition expresses this as:
+
+$$
+|T\rangle = \alpha|\phi_0\rangle + \beta|\phi_1\rangle
+$$
+
+where $|\phi_0\rangle$ and $|\phi_1\rangle$ are stabilizer states and $\alpha, \beta$ are complex coefficients.
+
+<Info>
+Specifically:
+$$
+|T\rangle = \frac{1}{\sqrt{2}}|+\rangle + \frac{e^{i\pi/4}}{\sqrt{2}}|-\rangle
+$$
+
+Both $|+\rangle$ and $|-\rangle$ are stabilizer states (can be prepared by applying H to $|0\rangle$ or $|1\rangle$).
+</Info>
+
+### How tsim Applies BSS Decomposition
+
+When tsim encounters a circuit with T gates, it uses the BSS decomposition in the ZX-calculus framework (`stabrank.py:34`):
+
+```python
+def find_stab_magic(graphs: Iterable[BaseGraph]) -> list[BaseGraph]:
+    """Recursively decompose ZX-graphs into stabilizer components via magic-state removal."""
+    return _decompose(
+        list(graphs),
+        count_fn=zx.simplify.tcount,  # Count T gates
+        replace_fn=lambda g: zx.simulate.replace_magic_states(g, pick_random=False),
+    )
+```
+
+The `replace_magic_states` function:
+1. Identifies a T gate (Z-spider with phase π/4) in the graph
+2. Replaces it with a sum of two graphs - one for each stabilizer component
+3. Returns both graphs for further processing
+
+This is applied **recursively** until all T gates are removed.
+
+## Recursive Decomposition
+
+The key algorithm in tsim is recursive decomposition (`stabrank.py:9`):
+
+```python
+def _decompose(
+    graphs: Sequence[BaseGraph],
+    count_fn,
+    replace_fn,
+) -> list[BaseGraph]:
+    """Recursively decompose graphs using stabilizer rank decomposition."""
+    results: list[BaseGraph] = []
+    for graph in graphs:
+        if count_fn(graph) == 0:  # No more non-Clifford gates
+            results.append(graph)
+            continue
+        
+        gsum = replace_fn(graph.copy())  # Decompose one gate
+        for g in gsum.graphs:
+            zx.full_reduce(g, paramSafe=True)  # Simplify
+            if g.scalar.is_zero:
+                continue
+            results.extend(_decompose([g], count_fn, replace_fn))  # Recurse
+    return results
+```
+
+### Example: Circuit with Two T Gates
+
+Consider a circuit with two T gates:
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    H 0
+    T 0
+    H 0  
+    T 0
+    M 0
+""")
+```
+
+The decomposition proceeds:
+
+1. **Initial graph**: Contains 2 T gates (T-count = 2)
+2. **First decomposition**: Replace first T gate → produces 2 graphs, each with T-count = 1
+3. **Second decomposition**: Replace remaining T gate in each graph → produces 4 graphs total, all with T-count = 0
+4. **Result**: Circuit expressed as sum of 4 Clifford circuits
+
+You can verify this:
+
+```python
+# Count T gates before decomposition
+print(c.tcount())  # Output: 2
+
+# After compilation, the circuit is decomposed into 2^2 = 4 components
+sampler = c.compile_sampler()
+print(len(sampler.program.components))  # May be fewer if components are disconnected
+```
+
+<Note>
+The number of stabilizer components grows as $2^{n_T}$ where $n_T$ is the T-count. After ZX-calculus simplification, some components may have zero amplitude and are discarded, but the worst-case scaling is exponential.
+</Note>
+
+## Handling Arbitrary Rotations
+
+Beyond T gates, tsim also supports arbitrary rotation gates like `R_Z(θ)`, `R_X(θ)`, `R_Y(θ)`, and `U3(θ, φ, λ)`. These require a different decomposition strategy.
+
+### U3 Decomposition
+
+The U3 gate is decomposed first (`stabrank.py:42`):
+
+```python
+def find_stab_u3(graphs: Iterable[BaseGraph]) -> list[BaseGraph]:
+    """Recursively decompose ZX-graphs by removing U3 phases."""
+    return _decompose(
+        list(graphs),
+        count_fn=zx.simplify.u3_count,
+        replace_fn=zx.simulate.replace_u3_states,
+    )
+```
+
+The `replace_u3_states` function expands arbitrary rotations into sums of simpler terms. The exact decomposition depends on the angle:
+
+- **Dyadic angles** (multiples of π/2^k): Can be expressed with a finite number of terms
+- **Non-dyadic angles**: May require approximation or infinite series (tsim uses finite precision)
+
+### Two-Stage Decomposition
+
+The main entry point (`stabrank.py:51`) applies both decompositions:
+
+```python
+def find_stab(graph: BaseGraph) -> list[BaseGraph]:
+    """Decompose a ZX-graph into a sum of stabilizer components."""
+    zx.full_reduce(graph, paramSafe=True)
+    graphs = find_stab_u3([graph])      # First: remove U3/rotation phases
+    return find_stab_magic(graphs)       # Second: remove T gates
+```
+
+This two-stage approach handles circuits mixing arbitrary rotations and T gates.
+
+## Simplification Between Decomposition Steps
+
+Crucially, tsim applies ZX-calculus simplification after each decomposition step:
+
+```python
+for g in gsum.graphs:
+    zx.full_reduce(g, paramSafe=True)  # ← Simplification!
+    if g.scalar.is_zero:
+        continue  # Discard zero-amplitude components
+    results.extend(_decompose([g], count_fn, replace_fn))
+```
+
+This is **essential for performance**. Without simplification, the number of components would always be exactly $2^{n_T}$. With simplification:
+
+- Many components may reduce to zero amplitude and be discarded
+- Remaining components become simpler Clifford circuits
+- The effective stabilizer rank is often much smaller than $2^{n_T}$
+
+<Info>
+This is the key insight from [Sutcliffe and Kissinger (2025)](https://arxiv.org/abs/2403.06777): combining ZX-calculus simplification with stabilizer rank decomposition significantly outperforms naive decomposition.
+</Info>
+
+## Sampling from Decomposed Circuits
+
+Once a circuit is decomposed into stabilizer components, sampling proceeds by:
+
+1. **Evaluate each component**: For a given measurement outcome $m$, compute the amplitude from each stabilizer component $i$:
+   $$
+   a_i(m) = \langle m | U_i | \psi_0 \rangle
+   $$
+   where $U_i$ is the $i$-th Clifford circuit.
+
+2. **Combine amplitudes**: The total amplitude is:
+   $$
+   a(m) = \sum_{i=1}^{\chi} c_i \cdot a_i(m)
+   $$
+
+3. **Compute probability**: The measurement probability is:
+   $$
+   P(m) = |a(m)|^2 = \left|\sum_{i=1}^{\chi} c_i \cdot a_i(m)\right|^2
+   $$
+
+4. **Sample**: Use autoregressive sampling to efficiently sample from $P(m)$ without computing all $2^n$ probabilities.
+
+The evaluation of each $a_i(m)$ uses **exact arithmetic** (dyadic numbers and roots of unity) to maintain numerical precision (`evaluate.py`).
+
+## Performance Implications
+
+### When Stabilizer Rank is Small
+
+Circuits where ZX-calculus simplification significantly reduces the effective stabilizer rank:
+
+✅ T gates that cancel or simplify away
+✅ Structured circuits (e.g., quantum error correction circuits)
+✅ Circuits with limited T-gate depth (gates can merge)
+
+### When Stabilizer Rank is Large
+
+Circuits where stabilizer rank remains near $2^{n_T}$:
+
+❌ Random T gate placements
+❌ Deep T gate sequences without structure  
+❌ Many T gates on different qubits
+
+<Note>
+As a rule of thumb, tsim handles circuits with **< 30 T gates** efficiently. Beyond this, compilation time and memory usage can become prohibitive. For pure sampling tasks (not computing exact probabilities), magic state injection techniques may be more efficient for high T-count circuits.
+</Note>
+
+## Comparison with Other Approaches
+
+### State Vector Simulation
+
+**Standard approach**: Maintain full state vector $|\psi\rangle \in \mathbb{C}^{2^n}$
+- **Space**: $O(2^n)$ complex numbers
+- **Time per gate**: $O(2^n)$ operations
+- **Limit**: ~30-40 qubits
+
+**tsim (stabilizer rank)**: Maintain $\chi$ stabilizer states
+- **Space**: $O(\chi \cdot n^2)$ (Clifford circuits on $n$ qubits)
+- **Time per sample**: $O(\chi \cdot \text{poly}(n))$
+- **Limit**: Hundreds of qubits, if $\chi \ll 2^n$
+
+### Tensor Network Methods
+
+**Tensor networks**: Represent state as contracted tensor network
+- Work well for low-entanglement circuits
+- Struggle with highly entangled states
+
+**tsim**: Works well when T-count is low
+- Handles arbitrary entanglement in Clifford subcircuits
+- Struggles when T-count is high
+
+<Info>
+The two approaches are complementary: tensor networks excel at low-entanglement, high-T-count circuits, while stabilizer rank methods excel at high-entanglement, low-T-count circuits.
+</Info>
+
+## Advanced: Phase Polynomial Representation
+
+Internally, tsim represents each stabilizer component as a **phase polynomial** - a sum of phase terms involving measurement outcomes and error bits (`compile.py:14`):
+
+$$
+\text{amplitude} = \prod_{a \in A} (1 + e^{i\alpha_a}) \cdot \prod_{b \in B} e^{i\beta_b} \cdot \ldots
+$$
+
+These are compiled into JAX arrays with different term types:
+- **Type A**: Node terms $(1 + e^{i\alpha})$
+- **Type B**: Half-pi terms $e^{i\beta}$  
+- **Type C**: Pi-pair terms $e^{i\Psi\Phi}$
+- **Type D**: Phase pairs $(1 + e^a + e^b - e^{a+b})$
+
+Each term can depend on error bits (from noise) and measurement outcomes (for conditional probabilities). The evaluation uses exact dyadic arithmetic to compute these phase polynomials (`evaluate.py`).
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Non-Clifford Gates" icon="calculator" href="/concepts/non-clifford-gates">
+    See which non-Clifford gates tsim supports
+  </Card>
+  <Card title="ZX-Calculus" icon="diagram-project" href="/concepts/zx-calculus">
+    Learn about the simplification rules that reduce stabilizer rank
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/concepts/overview">
+    Understand how stabilizer rank fits into the compilation pipeline
+  </Card>
+  <Card title="GPU Acceleration" icon="gauge" href="/guides/gpu-acceleration">
+    Optimize your circuits for stabilizer rank decomposition
+  </Card>
+</CardGroup>

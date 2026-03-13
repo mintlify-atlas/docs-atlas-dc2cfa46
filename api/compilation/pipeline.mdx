@@ -1,0 +1,84 @@
+---
+title: Compilation Pipeline
+description: API reference for tsim's compilation pipeline from prepared graphs to executable programs
+---
+
+The compilation pipeline transforms prepared graphs into executable sampling programs through connected component analysis, stabilizer rank decomposition, and circuit compilation.
+
+## compile_program
+
+```python
+def compile_program(
+    prepared: SamplingGraph,
+    *,
+    mode: DecompositionMode,
+) -> CompiledProgram
+```
+
+Compile a prepared graph into an executable sampling program.
+
+This function performs the second phase of compilation:
+1. Split the graph into connected components
+2. For each component:
+   - Plug outputs according to mode (sequential or joint)
+   - Reduce each plugged graph
+   - Perform stabilizer rank decomposition
+   - Compile into CompiledScalarGraphs objects
+3. Assemble into CompiledProgram with output ordering
+
+<ParamField path="prepared" type="SamplingGraph" required>
+  The prepared graph from `prepare_graph()`
+</ParamField>
+
+<ParamField path="mode" type="DecompositionMode" required>
+  Decomposition mode:
+  - `"sequential"`: For sampling - creates [0, 1, 2, ..., n] circuits
+  - `"joint"`: For probability estimation - creates [0, n] circuits
+</ParamField>
+
+<ResponseField name="return" type="CompiledProgram">
+  A CompiledProgram ready for sampling
+</ResponseField>
+
+### Example
+
+```python
+from tsim import compile_program, prepare_graph
+
+# Prepare a graph first
+prepared = prepare_graph(circuit)
+
+# Compile for sampling (sequential mode)
+program = compile_program(prepared, mode="sequential")
+
+# Or compile for probability estimation (joint mode)
+program = compile_program(prepared, mode="joint")
+```
+
+## Types
+
+### DecompositionMode
+
+```python
+DecompositionMode = Literal["sequential", "joint"]
+```
+
+Specifies the output plugging strategy:
+- **`"sequential"`**: Creates circuits for incremental outputs [0, 1, 2, ..., n]. Used for sampling where you need to measure qubits sequentially.
+- **`"joint"`**: Creates only boundary circuits [0, n]. Used for probability estimation where you only need the initial and final states.
+
+### CompiledProgram
+
+The compiled program contains:
+- `components`: Tuple of compiled connected components
+- `output_order`: Array mapping component outputs to global output indices
+- `num_outputs`: Total number of outputs in the circuit
+- `num_f_params`: Number of error probability parameters
+- `num_detectors`: Number of detector outcomes
+
+### CompiledComponent
+
+Each compiled component contains:
+- `output_indices`: Global output indices for this component
+- `f_selection`: Subset of global f-parameter indices used by this component
+- `compiled_scalar_graphs`: Tuple of compiled scalar graph representations

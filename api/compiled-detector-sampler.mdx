@@ -1,0 +1,355 @@
+---
+title: CompiledDetectorSampler
+description: Compiled sampler for efficient detector and observable sampling
+---
+
+## Overview
+
+The `CompiledDetectorSampler` class provides GPU-accelerated sampling of detector events and logical observable outcomes from quantum circuits. It compiles the circuit into an optimized representation using sequential decomposition and autoregressive sampling.
+
+This sampler is essential for quantum error correction simulations, where detectors indicate the presence of errors and observables track logical qubit states.
+
+## Constructor
+
+### `__init__`
+
+```python
+CompiledDetectorSampler(circuit: Circuit, *, seed: int | None = None)
+```
+
+Create a compiled detector sampler from a quantum circuit.
+
+<ParamField path="circuit" type="Circuit">
+  The quantum circuit to compile for detector sampling. The circuit must define detectors using DETECTOR instructions.
+</ParamField>
+
+<ParamField path="seed" type="int | None" default="None">
+  Random seed for JAX random number generation. If None, a random seed is generated automatically.
+</ParamField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit, seed=42)
+```
+
+<Note>
+  The compilation process analyzes the circuit structure to optimize detector and observable computations.
+</Note>
+
+## Methods
+
+### `sample`
+
+```python
+sample(
+    shots: int,
+    *,
+    batch_size: int | None = None,
+    prepend_observables: bool = False,
+    append_observables: bool = False,
+    separate_observables: bool = False,
+    bit_packed: bool = False
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]
+```
+
+Sample detector and observable outcomes from the compiled circuit.
+
+<ParamField path="shots" type="int">
+  The number of times to sample every detector in the circuit.
+</ParamField>
+
+<ParamField path="batch_size" type="int | None" default="None">
+  The number of samples to process in each batch. When using a GPU, increase this value until VRAM is fully utilized for maximum performance. If None, processes all shots in one batch.
+</ParamField>
+
+<ParamField path="prepend_observables" type="bool" default="False">
+  When True, observables are included with the detectors and placed at the start of the results.
+</ParamField>
+
+<ParamField path="append_observables" type="bool" default="False">
+  When True, observables are included with the detectors and placed at the end of the results.
+</ParamField>
+
+<ParamField path="separate_observables" type="bool" default="False">
+  When True, returns a tuple `(detection_events, observable_flips)` instead of a flat array.
+</ParamField>
+
+<ParamField path="bit_packed" type="bool" default="False">
+  When True, results are bit-packed into uint8 arrays for memory efficiency.
+</ParamField>
+
+<ResponseField name="returns" type="numpy.ndarray | tuple[numpy.ndarray, numpy.ndarray]">
+  By default, returns a numpy array of shape `(shots, num_detectors)` containing boolean detector outcomes.
+  
+  When `append_observables=True`, shape is `(shots, num_detectors + num_observables)`.
+  
+  When `prepend_observables=True`, observables come first: `(shots, num_observables + num_detectors)`.
+  
+  When `separate_observables=True`, returns a tuple of two arrays: `(detectors, observables)` with shapes `(shots, num_detectors)` and `(shots, num_observables)`.
+  
+  When `bit_packed=True`, the boolean arrays are packed into uint8 arrays using numpy's bit-packing.
+</ResponseField>
+
+**Example - Basic detector sampling:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    X_ERROR(0.1) 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit, seed=42)
+detectors = sampler.sample(shots=10000)
+
+print(detectors.shape)  # (10000, 1)
+print(detectors.dtype)  # bool
+```
+
+**Example - Detector and observable sampling:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    X_ERROR(0.1) 0
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit, seed=42)
+
+# Separate arrays for detectors and observables
+detectors, observables = sampler.sample(
+    shots=10000,
+    separate_observables=True
+)
+
+print(detectors.shape)    # (10000, 1)
+print(observables.shape)  # (10000, 1)
+```
+
+**Example - Appending observables:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1]
+    OBSERVABLE_INCLUDE(0) rec[-1]
+    OBSERVABLE_INCLUDE(1) rec[-2]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit, seed=42)
+
+# Detectors followed by observables in one array
+results = sampler.sample(shots=1000, append_observables=True)
+print(results.shape)  # (1000, 3) - 1 detector + 2 observables
+
+detectors = results[:, :1]
+observables = results[:, 1:]
+```
+
+**Example - Bit-packed output:**
+
+```python
+import tsim
+import numpy as np
+
+# Circuit with many detectors
+circuit = tsim.Circuit('''
+    H 0 1 2 3 4 5 6 7
+    M 0 1 2 3 4 5 6 7
+    DETECTOR rec[-1]
+    DETECTOR rec[-2]
+    DETECTOR rec[-3]
+    DETECTOR rec[-4]
+    DETECTOR rec[-5]
+    DETECTOR rec[-6]
+    DETECTOR rec[-7]
+    DETECTOR rec[-8]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit, seed=42)
+
+# Bit-packed for memory efficiency
+packed = sampler.sample(shots=10000, bit_packed=True)
+print(packed.shape)  # (10000, 1) - 8 detectors packed into 1 byte
+print(packed.dtype)  # uint8
+
+# Unpack if needed
+unpacked = np.unpackbits(packed, axis=1, count=8, bitorder='little')
+print(unpacked.shape)  # (10000, 8)
+```
+
+## Performance Optimization
+
+### Batch Size Tuning
+
+For GPU acceleration, tune the batch size based on your hardware:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    # ... QEC circuit with detectors ...
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit)
+
+# Start with default, increase for GPU
+samples = sampler.sample(shots=1000000, batch_size=4096)
+```
+
+<Tip>
+  Typical GPU batch sizes range from 2048 to 8192. Monitor GPU memory usage and increase batch_size until you see diminishing returns.
+</Tip>
+
+### Memory Efficiency
+
+For large-scale simulations, use bit-packing to reduce memory usage:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    # Circuit with 100 detectors
+    # ...
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit)
+
+# Without bit-packing: 10M shots × 100 detectors × 1 byte = 1GB
+samples = sampler.sample(shots=10_000_000, bit_packed=False)
+
+# With bit-packing: 10M shots × 13 bytes ≈ 130MB (8x reduction)
+samples_packed = sampler.sample(shots=10_000_000, bit_packed=True)
+```
+
+## Quantum Error Correction Example
+
+```python
+import tsim
+import numpy as np
+
+# Repetition code with distance 3
+circuit = tsim.Circuit('''
+    # Initialize |000>
+    # Apply bit-flip noise
+    X_ERROR(0.05) 0 1 2
+    
+    # Measure stabilizers
+    CNOT 0 3 1 3
+    CNOT 1 4 2 4
+    M 3 4
+    
+    # Define detectors
+    DETECTOR rec[-2]
+    DETECTOR rec[-1]
+    
+    # Measure logical observable
+    M 0 1 2
+    OBSERVABLE_INCLUDE(0) rec[-3] rec[-2] rec[-1]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit, seed=42)
+
+# Sample detector events and logical observable
+detectors, observables = sampler.sample(
+    shots=100000,
+    separate_observables=True,
+    batch_size=2048
+)
+
+# Analyze error rates
+detector_error_rate = np.mean(np.any(detectors, axis=1))
+logical_error_rate = np.mean(observables[:, 0])
+
+print(f"Detector error rate: {detector_error_rate:.4f}")
+print(f"Logical error rate: {logical_error_rate:.4f}")
+```
+
+## Alternative: Quick Sampling
+
+For convenience, use the `compile_detector_sampler` method directly on circuits:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+''')
+
+# Equivalent to CompiledDetectorSampler(circuit, seed=42)
+sampler = circuit.compile_detector_sampler(seed=42)
+detectors = sampler.sample(shots=1000)
+```
+
+## Compilation Statistics
+
+The sampler provides detailed compilation statistics:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    DEPOLARIZE2(0.01) 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+''')
+
+sampler = tsim.CompiledDetectorSampler(circuit)
+print(sampler)
+# CompiledDetectorSampler(6 graphs, 4 error channel bits, 1 outputs for largest cc,
+#                         ≤ 5 parameters, 12 A terms, 8 B terms, 4 C terms, 2 D terms, 2.4 kB)
+```
+
+The statistics indicate:
+- **graphs**: Number of compiled ZX graphs
+- **error channel bits**: Number of noise parameters being sampled
+- **outputs for largest cc**: Maximum outputs in any connected component
+- **A/B/C/D terms**: Complexity of the compiled representation
+- **Memory**: Total memory footprint
+
+## Technical Details
+
+### Detector Computation
+
+Detectors are computed from measurements according to the circuit's DETECTOR instructions. The sampler:
+1. Samples all measurements (including any noise)
+2. Computes detector values as XOR combinations of measurement outcomes
+3. Computes observables as XOR combinations specified by OBSERVABLE_INCLUDE
+
+### Sequential Decomposition
+
+Like the measurement sampler, this uses sequential decomposition for efficient autoregressive sampling of the joint distribution over detectors and observables.
+
+### Hardware Acceleration
+
+The sampler automatically leverages JAX for hardware acceleration on CPUs, GPUs, and TPUs without requiring code changes.

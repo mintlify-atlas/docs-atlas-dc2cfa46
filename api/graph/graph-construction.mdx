@@ -1,0 +1,327 @@
+---
+title: Graph Construction
+description: Build and manipulate ZX graphs for quantum circuit sampling
+---
+
+The graph construction module provides functions for creating, transforming, and preparing ZX graphs from quantum circuits. These functions form the foundation of tsim's compilation pipeline.
+
+## Core Functions
+
+### prepare_graph
+
+```python
+def prepare_graph(
+    circuit: Circuit,
+    *,
+    sample_detectors: bool
+) -> SamplingGraph
+```
+
+Prepare a circuit for compilation by converting it to a reduced ZX graph.
+
+This is the main entry point for the graph preparation phase. It performs:
+1. Parse the stim circuit into a ZX graph
+2. Build the sampling graph (compose with adjoint, add outputs)
+3. Reduce the graph via `zx.full_reduce`
+4. Transform error basis via Gaussian elimination (e → f)
+5. Clear the scalar (safe before stabilizer rank decomposition)
+
+<ParamField path="circuit" type="Circuit" required>
+  The quantum circuit to prepare
+</ParamField>
+
+<ParamField path="sample_detectors" type="bool" required>
+  If `True`, prepare for detector sampling. If `False`, prepare for measurement sampling.
+</ParamField>
+
+<ResponseField name="return" type="SamplingGraph">
+  A `SamplingGraph` containing the reduced graph and error transformation
+</ResponseField>
+
+**Example**
+
+```python
+from tsim import Circuit
+from tsim.core.graph import prepare_graph
+
+# Create a noisy circuit
+circuit = Circuit("""
+    X_ERROR(0.01) 0
+    H 0
+    CNOT 0 1
+    M 0 1
+""")
+
+# Prepare for measurement sampling
+sampling_graph = prepare_graph(circuit, sample_detectors=False)
+
+print(f"Graph has {sampling_graph.num_outputs} outputs")
+print(f"Error transform shape: {sampling_graph.error_transform.shape}")
+```
+
+---
+
+### build_sampling_graph
+
+```python
+def build_sampling_graph(
+    built: GraphRepresentation,
+    sample_detectors: bool = False
+) -> BaseGraph
+```
+
+Build a ZX graph for sampling from a `GraphRepresentation`.
+
+This function constructs the sampling graph by:
+- Initializing uninitialized vertices to the |0⟩ state
+- Composing the graph with its adjoint
+- Connecting measurement vertices
+- Adding output boundaries
+
+<ParamField path="built" type="GraphRepresentation" required>
+  The graph representation from circuit parsing
+</ParamField>
+
+<ParamField path="sample_detectors" type="bool" default="False">
+  If `True`, include detector and observable outputs. If `False`, only include measurement outputs.
+</ParamField>
+
+<ResponseField name="return" type="BaseGraph">
+  A ZX graph ready for sampling
+</ResponseField>
+
+---
+
+### connected_components
+
+```python
+def connected_components(g: BaseGraph) -> list[ConnectedComponent]
+```
+
+Decompose a graph into independent connected components.
+
+Each component can be compiled and sampled separately, improving efficiency for circuits with disjoint subcircuits.
+
+<ParamField path="g" type="BaseGraph" required>
+  The ZX graph to decompose
+</ParamField>
+
+<ResponseField name="return" type="list[ConnectedComponent]">
+  List of connected components, each containing a subgraph and its output indices
+</ResponseField>
+
+**Example**
+
+```python
+from tsim.core.graph import prepare_graph, connected_components
+
+# Circuit with two independent qubits
+circuit = Circuit("""
+    H 0
+    M 0
+    H 1
+    M 1
+""")
+
+sampling_graph = prepare_graph(circuit, sample_detectors=False)
+components = connected_components(sampling_graph.graph)
+
+print(f"Found {len(components)} independent components")
+for i, comp in enumerate(components):
+    print(f"Component {i}: outputs {comp.output_indices}")
+```
+
+---
+
+## Graph Transformations
+
+### transform_error_basis
+
+```python
+def transform_error_basis(
+    g: BaseGraph,
+    num_e: int | None = None
+) -> tuple[BaseGraph, np.ndarray]
+```
+
+Transform phase variables from the original 'e' basis to a reduced 'f' basis.
+
+This function finds a linearly independent basis for the phase variables across all vertices and transforms them accordingly. The original variables (e0, e1, ...) are mapped to a smaller set (f0, f1, ...) where each f_i corresponds to a linear combination of original e variables.
+
+<ParamField path="g" type="BaseGraph" required>
+  A ZX graph with phase variables attached to vertices
+</ParamField>
+
+<ParamField path="num_e" type="int | None" default="None">
+  Total number of e-variables. If provided, the returned matrix will have exactly this many columns (padded with zeros if needed). If `None`, the matrix will have only the columns that appear in the graph.
+</ParamField>
+
+<ResponseField name="return" type="tuple[BaseGraph, np.ndarray]">
+  A tuple containing:
+  - The modified graph (mutated in place)
+  - A binary matrix of shape `(num_f, num_e)` where entry `[i, j] = 1` means `f_i` depends on `e_j`. For example, if row 0 is `[0, 1, 0, 1]`, then `f0 = e1 XOR e3`.
+</ResponseField>
+
+**Example**
+
+```python
+from tsim.core.graph import transform_error_basis
+import numpy as np
+
+# Assume g is a graph with e0, e1, e2 parameters
+graph, error_transform = transform_error_basis(g, num_e=3)
+
+print(f"Reduced from e-basis to {error_transform.shape[0]} f-parameters")
+print("Error transform matrix:")
+print(error_transform)
+
+# If error_transform[0] = [1, 1, 0], then f0 = e0 XOR e1
+```
+
+---
+
+### squash_graph
+
+```python
+def squash_graph(g: BaseGraph) -> None
+```
+
+Compact the graph by placing vertices underneath their output connections.
+
+Starting from output vertices, each vertex is placed directly underneath (same row, qubit - 1) its already-placed neighbor. Positions are assigned via BFS traversal from outputs, ensuring no `(qubit, row)` collisions.
+
+This improves visualization and can help with compilation efficiency.
+
+<ParamField path="g" type="BaseGraph" required>
+  A ZX graph to compact (modified in place)
+</ParamField>
+
+---
+
+### scale_horizontally
+
+```python
+def scale_horizontally(g: BaseGraph, scale: float) -> None
+```
+
+Scale horizontal positions of graph vertices by a factor.
+
+<ParamField path="g" type="BaseGraph" required>
+  A ZX graph to scale (modified in place)
+</ParamField>
+
+<ParamField path="scale" type="float" required>
+  The factor to scale the graph by
+</ParamField>
+
+**Example**
+
+```python
+from tsim.core.graph import scale_horizontally
+
+# Make graph twice as wide for better visualization
+scale_horizontally(graph, 2.0)
+```
+
+---
+
+## Utility Functions
+
+### get_params
+
+```python
+def get_params(g: BaseGraph) -> set[str]
+```
+
+Get all parameter variables that appear in the graph and its scalar.
+
+Collects variables from:
+- Vertex phases (`g._phaseVars`)
+- Scalar phase variables (phasevars_pi, phasevars_pi_pair, phasevars_halfpi)
+- Scalar phase pairs (phasepairs with paramsA, paramsB)
+- Scalar phase nodes (phasenodevars)
+
+<ParamField path="g" type="BaseGraph" required>
+  A ZX graph with parametrized phases
+</ParamField>
+
+<ResponseField name="return" type="set[str]">
+  Set of all variable names (e.g., `{'f0', 'f2', 'm1'}`) that appear in the graph
+</ResponseField>
+
+**Example**
+
+```python
+from tsim.core.graph import get_params
+
+params = get_params(sampling_graph.graph)
+print(f"Graph uses {len(params)} parameters: {params}")
+```
+
+---
+
+### evaluate_graph
+
+```python
+def evaluate_graph(
+    g: GraphS,
+    vals: dict[str, Fraction] | None = None
+) -> np.ndarray
+```
+
+Evaluate a ZX graph to a tensor with given parameter values.
+
+<ParamField path="g" type="GraphS" required>
+  A ZX graph with parametrized phases
+</ParamField>
+
+<ParamField path="vals" type="dict[str, Fraction] | None" default="None">
+  Dictionary mapping parameter names to their values. If `None`, all parameters are set to 0.
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  The tensor representation of the evaluated graph
+</ResponseField>
+
+**Example**
+
+```python
+from tsim.core.graph import evaluate_graph
+from fractions import Fraction
+
+# Evaluate graph with specific parameter values
+vals = {'f0': Fraction(1, 2), 'f1': Fraction(0, 1)}
+tensor = evaluate_graph(graph, vals)
+print(f"Tensor shape: {tensor.shape}")
+```
+
+---
+
+## Data Structures
+
+### ConnectedComponent
+
+```python
+@dataclass
+class ConnectedComponent:
+    graph: BaseGraph
+    output_indices: list[int]
+```
+
+A connected subgraph with its associated output indices.
+
+<ResponseField name="graph" type="BaseGraph">
+  The ZX subgraph representing this component
+</ResponseField>
+
+<ResponseField name="output_indices" type="list[int]">
+  List of output indices matching the original output indices from the full graph
+</ResponseField>
+
+---
+
+## See Also
+
+- [Core Types](/api/graph/types) - Data structures for compilation stages
+- [Compilation](/api/compilation/pipeline) - Compiling graphs for sampling
+- [Circuit](/api/circuit) - Creating quantum circuits

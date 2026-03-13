@@ -1,0 +1,517 @@
+---
+title: "Noise Models"
+description: "Add realistic Pauli noise channels and error simulation to quantum circuits"
+---
+
+## Overview
+
+tsim supports comprehensive Pauli noise modeling for realistic quantum circuit simulation. This guide covers the available noise channels, how to add them to circuits, and advanced noise modeling techniques.
+
+## Basic Noise Channels
+
+### Single-Qubit Pauli Errors
+
+Apply X, Y, or Z errors with specified probabilities:
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    H 0
+    
+    # 10% chance of X error
+    X_ERROR(0.1) 0
+    
+    # 5% chance of Y error
+    Y_ERROR(0.05) 1
+    
+    # 2% chance of Z error  
+    Z_ERROR(0.02) 2
+    
+    M 0 1 2
+""")
+
+sampler = c.compile_sampler(seed=42)
+samples = sampler.sample(shots=10000)
+```
+
+### Depolarizing Noise
+
+Apply uniform Pauli noise (X, Y, or Z with equal probability):
+
+```python
+c = tsim.Circuit("""
+    H 0
+    
+    # 1% depolarizing noise (p/3 each for X, Y, Z)
+    DEPOLARIZE1(0.01) 0
+    
+    CNOT 0 1
+    
+    # Two-qubit depolarizing (15 possible Pauli errors)
+    DEPOLARIZE2(0.01) 0 1
+    
+    M 0 1
+""")
+```
+
+<Note>
+`DEPOLARIZE1(p)` applies I with probability (1-p), and X, Y, Z each with probability p/3.
+
+`DEPOLARIZE2(p)` applies I⊗I with probability (1-p), and each of the 15 non-identity two-qubit Paulis with probability p/15.
+</Note>
+
+### Pauli Channels
+
+Specify custom probability distributions over Pauli operators:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    
+    # PAULI_CHANNEL_1(px, py, pz)
+    # px=10% X, py=5% Y, pz=2% Z, pi=83% I
+    PAULI_CHANNEL_1(0.1, 0.05, 0.02) 0
+    
+    M 0
+""")
+```
+
+Two-qubit Pauli channels specify all 15 error probabilities:
+
+```python
+c = tsim.Circuit("""
+    CNOT 0 1
+    
+    # PAULI_CHANNEL_2(pix, piy, piz, pxi, pxx, pxy, pxz, pyi, pyx, pyy, pyz, pzi, pzx, pzy, pzz)
+    PAULI_CHANNEL_2(
+        0.01, 0.01, 0.01,  # IX, IY, IZ
+        0.01, 0.01, 0.01, 0.01,  # XI, XX, XY, XZ
+        0.01, 0.01, 0.01, 0.01,  # YI, YX, YY, YZ
+        0.01, 0.01, 0.01, 0.01   # ZI, ZX, ZY, ZZ
+    ) 0 1
+    
+    M 0 1
+""")
+```
+
+## Measurement and Reset Errors
+
+### Measurement Errors
+
+Bit-flip errors during measurement:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    M 0
+    
+    # 1% chance measurement result flips
+    X_ERROR(0.01) rec[-1]
+""")
+```
+
+Or use built-in measurement noise:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    
+    # Measure with 2% bit-flip probability
+    M(0.02) 0
+""")
+```
+
+### Reset Errors
+
+Errors when resetting qubits:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    M 0
+    
+    # Reset with 1% error rate
+    R 0
+    X_ERROR(0.01) 0
+    
+    M 0
+""")
+```
+
+Or use noisy reset:
+
+```python
+c = tsim.Circuit("""
+    # Reset |0⟩ with 1% flip to |1⟩
+    RX(0.01) 0
+""")
+```
+
+## Correlated Errors
+
+### CORRELATED_ERROR
+
+Apply multi-qubit errors with specified probability:
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    CNOT 0 1
+    
+    # 10% chance of correlated X⊗X error
+    CORRELATED_ERROR(0.1) X0 X1
+    
+    M 0 1
+""")
+```
+
+### ELSE_CORRELATED_ERROR
+
+Chain alternative errors (mutually exclusive):
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    
+    # 10% X0, else 20% Y1, else 30% Z2 (mutually exclusive)
+    CORRELATED_ERROR(0.1) X0
+    ELSE_CORRELATED_ERROR(0.2) Y1
+    ELSE_CORRELATED_ERROR(0.3) Z2
+    
+    M 0 1 2
+""")
+```
+
+<Warning>
+Errors in a CORRELATED_ERROR/ELSE_CORRELATED_ERROR chain are mutually exclusive. At most one will occur per shot.
+</Warning>
+
+## Gate-Specific Noise Models
+
+### Realistic Two-Qubit Gate Noise
+
+```python
+def noisy_cnot(c, control, target, p):
+    """CNOT with realistic noise model."""
+    c.append("CNOT", [control, target])
+    c.append("DEPOLARIZE2", [control, target], arg=p)
+
+c = tsim.Circuit()
+noisy_cnot(c, 0, 1, p=0.01)  # 1% error rate
+c.append("M", [0, 1])
+
+sampler = c.compile_sampler(seed=42)
+samples = sampler.sample(shots=1000)
+```
+
+### Custom Gate Noise
+
+```python
+def noisy_t_gate(c, qubit, dephasing_rate=0.001):
+    """T gate with dephasing noise."""
+    c.append("T", qubit)
+    c.append("Z_ERROR", qubit, arg=dephasing_rate)
+
+c = tsim.Circuit()
+c.append("H", 0)
+noisy_t_gate(c, 0, dephasing_rate=0.005)
+c.append("M", 0)
+```
+
+## Noise-Aware Circuit Construction
+
+### Uniform Noise Model
+
+Add consistent noise throughout:
+
+```python
+def build_noisy_circuit(p_gate, p_meas):
+    c = tsim.Circuit()
+    
+    # Prepare Bell pair with noise
+    c.append("H", 0)
+    c.append("DEPOLARIZE1", 0, arg=p_gate)
+    
+    c.append("CNOT", [0, 1])
+    c.append("DEPOLARIZE2", [0, 1], arg=p_gate)
+    
+    # Noisy measurement
+    c.append("M", [0, 1])
+    c.append("X_ERROR", [stim.target_rec(-1), stim.target_rec(-2)], arg=p_meas)
+    
+    return c
+
+c = build_noisy_circuit(p_gate=0.001, p_meas=0.01)
+```
+
+### Layer-Based Noise
+
+```python
+c = tsim.Circuit("""
+    # Layer 1
+    H 0 1 2 3
+    DEPOLARIZE1(0.001) 0 1 2 3
+    
+    # Layer 2  
+    CNOT 0 1
+    CNOT 2 3
+    DEPOLARIZE2(0.005) 0 1
+    DEPOLARIZE2(0.005) 2 3
+    
+    # Layer 3
+    T 0 1 2 3
+    DEPOLARIZE1(0.001) 0 1 2 3
+    
+    # Measurement
+    M 0 1 2 3
+    X_ERROR(0.01) rec[-1] rec[-2] rec[-3] rec[-4]
+""")
+```
+
+## Noise Analysis
+
+### Channel Simplification
+
+tsim automatically simplifies noise channels:
+
+```python
+c = tsim.Circuit("""
+    # Three separate X errors on same qubit
+    X_ERROR(0.1) 0
+    X_ERROR(0.1) 0  
+    X_ERROR(0.1) 0
+    M 0
+""")
+
+sampler = c.compile_sampler(seed=42)
+
+# Channels are combined via XOR convolution
+print(f"Channels: {len(sampler._channel_sampler.channels)}")
+# Output: Channels: 1 (three channels merged into one)
+```
+
+### Detector Error Models
+
+Generate detector error models for analysis:
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    CNOT 0 1
+    DEPOLARIZE2(0.01) 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+""")
+
+# Extract error model
+dem = c.detector_error_model(
+    decompose_errors=False,
+    approximate_disjoint_errors=0.001
+)
+
+print(dem)
+# Shows which errors cause which detector events
+```
+
+## Advanced Noise Patterns
+
+### Time-Correlated Noise
+
+Model noise that persists across time:
+
+```python
+c = tsim.Circuit()
+
+for round in range(10):
+    c.append("H", 0)
+    c.append("M", 0)
+    c.append("R", 0)
+    
+    # Same noise channel affects multiple rounds
+    c.append("DEPOLARIZE1", 0, arg=0.01)
+    
+    if round > 0:
+        c.append("DETECTOR", [stim.target_rec(-1), stim.target_rec(-2)])
+```
+
+### Spatially-Varying Noise
+
+```python
+def spatial_noise(c, qubit, x, y):
+    """Noise depends on physical location."""
+    # Edge qubits have higher error rates
+    if x == 0 or y == 0:
+        p = 0.01
+    else:
+        p = 0.005
+    
+    c.append("DEPOLARIZE1", qubit, arg=p)
+
+c = tsim.Circuit()
+for x in range(3):
+    for y in range(3):
+        qubit = x * 3 + y
+        c.append("H", qubit)
+        spatial_noise(c, qubit, x, y)
+        c.append("M", qubit)
+```
+
+### Asymmetric Noise
+
+Different rates for different error types:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    
+    # X errors more likely than Z errors
+    PAULI_CHANNEL_1(0.02, 0.005, 0.001) 0  # px=2%, py=0.5%, pz=0.1%
+    
+    M 0
+""")
+```
+
+## Benchmarking Noise Models
+
+### Measuring Error Rates
+
+```python
+import numpy as np
+
+def measure_error_rate(circuit, shots=100000):
+    """Measure actual error rate from samples."""
+    # Sample with noise
+    noisy_sampler = circuit.compile_sampler(seed=42)
+    noisy_samples = noisy_sampler.sample(shots)
+    
+    # Sample without noise
+    noiseless = circuit.without_noise()
+    noiseless_sampler = noiseless.compile_sampler(seed=42)
+    noiseless_samples = noiseless_sampler.sample(shots)
+    
+    # Count discrepancies
+    errors = np.sum(noisy_samples != noiseless_samples)
+    return errors / (shots * circuit.num_measurements)
+
+c = tsim.Circuit("""
+    H 0
+    DEPOLARIZE1(0.01) 0
+    M 0
+""")
+
+error_rate = measure_error_rate(c)
+print(f"Measured error rate: {error_rate:.4f}")  # ~0.01
+```
+
+### Comparing Noise Models
+
+```python
+models = {
+    "Low": 0.001,
+    "Medium": 0.01,
+    "High": 0.05
+}
+
+for name, p in models.items():
+    c = tsim.Circuit(f"""
+        H 0 1
+        CNOT 0 1
+        DEPOLARIZE2({p}) 0 1
+        M 0 1
+        DETECTOR rec[-1] rec[-2]
+    """)
+    
+    sampler = c.compile_detector_sampler(seed=42)
+    samples = sampler.sample(shots=10000)
+    
+    fire_rate = samples.mean()
+    print(f"{name} noise (p={p}): {fire_rate:.3%} detector fires")
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Match Hardware" icon="microchip">
+    Use noise parameters measured from real quantum hardware when available.
+  </Card>
+  
+  <Card title="Validate Rates" icon="chart-line">
+    Verify simulated error rates match expected values using noiseless comparisons.
+  </Card>
+  
+  <Card title="Start Simple" icon="lightbulb">
+    Begin with uniform depolarizing noise before adding complexity.
+  </Card>
+  
+  <Card title="Document Assumptions" icon="file-lines">
+    Clearly document noise model assumptions and parameters.
+  </Card>
+</CardGroup>
+
+## Common Noise Models
+
+### Standard Depolarizing
+
+```python
+PHYSICAL_ERROR_RATE = 0.001
+MEASUREMENT_ERROR_RATE = 0.01
+
+c = tsim.Circuit(f"""
+    # Gates
+    H 0
+    DEPOLARIZE1({PHYSICAL_ERROR_RATE}) 0
+    
+    CNOT 0 1
+    DEPOLARIZE2({PHYSICAL_ERROR_RATE}) 0 1
+    
+    # Measurement
+    M 0 1
+    X_ERROR({MEASUREMENT_ERROR_RATE}) rec[-1] rec[-2]
+""")
+```
+
+### Circuit-Level Noise
+
+```python
+def add_circuit_noise(c, gate_error=0.001, meas_error=0.01):
+    """Add realistic noise to any circuit."""
+    noisy = tsim.Circuit()
+    
+    for instr in c:
+        noisy.append(instr)
+        
+        # Add noise after gates
+        if instr.name in ["H", "S", "SQRT_X", "SQRT_Y"]:
+            for target in instr.targets_copy():
+                noisy.append("DEPOLARIZE1", target.value, arg=gate_error)
+        
+        elif instr.name in ["CNOT", "CZ", "SWAP"]:
+            targets = [t.value for t in instr.targets_copy()]
+            for i in range(0, len(targets), 2):
+                noisy.append("DEPOLARIZE2", targets[i:i+2], arg=gate_error)
+        
+        # Add measurement errors
+        elif instr.name == "M":
+            for i, _ in enumerate(instr.targets_copy()):
+                noisy.append("X_ERROR", stim.target_rec(-i-1), arg=meas_error)
+    
+    return noisy
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Detectors & Observables" icon="magnifying-glass" href="/guides/detectors-observables">
+    Use detectors to track errors in QEC circuits
+  </Card>
+  <Card title="Basic Usage" icon="book" href="/guides/basic-usage">
+    Learn core circuit building patterns
+  </Card>
+  <Card title="Detectors & Observables" icon="shield" href="/guides/detectors-observables">
+    Learn about error correction with detectors
+  </Card>
+  <Card title="Stim Noise Reference" icon="external-link" href="https://github.com/quantumlib/Stim/blob/main/doc/gates.md">
+    Full Stim noise instruction reference
+  </Card>
+</CardGroup>

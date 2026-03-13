@@ -1,0 +1,388 @@
+---
+title: 'Magic State Distillation'
+description: 'Simulate a 85-qubit magic state distillation protocol using the [17,1,5] color code'
+---
+
+In this tutorial, we simulate a magic state distillation protocol using tsim. We simulate the 85-qubit magic state distillation circuit introduced in [Rodriguez et al. (2025)](https://www.nature.com/articles/s41586-025-09367-3). This showcases tsim's ability to simulate large non-Clifford circuits that would be impossible to simulate using a state vector simulator.
+
+<Note>
+**Magic states** are special quantum states that, combined with Clifford operations, enable universal quantum computation. Magic state distillation is a crucial technique for fault-tolerant quantum computing.
+</Note>
+
+## Prerequisites
+
+```python
+import tsim
+import numpy as np
+from typing import Literal
+import matplotlib.pyplot as plt
+from tsim.utils.encoder import ColorEncoder5
+```
+
+## Preparing Magic States
+
+We start by preparing a particular magic state: the eigenstate of the "SH" operator. To simulate noise, we add a depolarizing channel after state preparation:
+
+```python
+theta = -np.arccos(np.sqrt(1 / 3)) / np.pi  # Distillation angle
+
+c = tsim.Circuit(f"R 0 \n R_X({theta}) 0 \n T_DAG 0 \n DEPOLARIZE1(0.05) 0 \n")
+c.diagram("timeline-svg", height=100)
+```
+
+### Measuring Infidelity
+
+By undoing the state preparation at the end, we can measure the infidelity:
+
+```python
+p = 0.05
+c = tsim.Circuit(
+    f"""
+    R 0 
+    R_X({theta}) 0
+    T_DAG 0
+    DEPOLARIZE1({p}) 0
+    T 0
+    R_X({-theta}) 0
+    M 0
+    """
+)
+sampler = c.compile_sampler()
+samples = sampler.sample(100_000, batch_size=100_000)
+print(f"Infidelity: {np.count_nonzero(samples) / len(samples)}")
+```
+
+The noisy state preparation process produces a magic state with **97% fidelity**.
+
+## Magic State Distillation: The Ideal Case
+
+Given multiple noisy magic states of low fidelity, we can distill a single high-fidelity magic state using a distillation circuit:
+
+```python
+def make_logical_distillation_circuit(angle: float):
+    return tsim.Circuit(
+        f"""
+        # initial state
+        R 0 1 2 3 4
+        R_X({angle}) 0 1 2 3 4
+        T_DAG 0 1 2 3 4
+        DEPOLARIZE1({p}) 0 1 2 3 4
+
+        # distillation
+        SQRT_X 0 1 4
+        CZ 0 1 2 3
+        SQRT_Y 0 3
+        CZ 0 2 3 4
+        TICK
+        SQRT_X_DAG 0
+        CZ 0 4 1 3
+        TICK
+        SQRT_X_DAG 0 1 2 3 4
+
+        # undo
+        T 0
+        R_X({-angle}) 0
+
+        M 0 1 2 3 4
+        """
+    )
+
+c = make_logical_distillation_circuit(theta)
+c.diagram("timeline-svg", height=240)
+```
+
+### Understanding the Distillation Circuit
+
+In this distillation circuit:
+- **q0**: The output qubit containing the distilled magic state
+- **q1, q2, q3, q4**: The distillation syndrome qubits
+
+If we measure the syndrome qubits in the state `[1,0,1,1]`, we know that distillation was successful and q0 is in a magic state with higher fidelity.
+
+<Steps>
+  <Step title="Sample from the circuit">
+    ```python
+    sampler = c.compile_sampler(seed=0)
+    samples = sampler.sample(50_000, batch_size=10_000)
+    ```
+  </Step>
+  
+  <Step title="Post-select successful distillations">
+    ```python
+    def post_select(samples: np.ndarray):
+        distilled_output = samples[:, 0]
+        distillation_syndromes = samples[:, 1:]
+        sel = np.all(distillation_syndromes == np.array([1, 0, 1, 1]), axis=1)
+        return distilled_output[sel]
+
+    post_selected_samples = post_select(samples)
+    print(f"Infidelity: {np.count_nonzero(post_selected_samples) / len(post_selected_samples):.5f}")
+    print(f"Percentage of post-selected samples: {len(post_selected_samples) / len(samples) * 100:.2f}%")
+    ```
+  </Step>
+</Steps>
+
+**Results:**
+- Fidelity has increased from 97% to **99.3%**
+- Success rate: **~14%** (we need to repeat distillation multiple times)
+
+### Analyzing the Rotation Angle Dependence
+
+We can study how the fidelity depends on the rotation angle of the `R_X` gate:
+
+```python
+angles = np.linspace(-0.4, 0.4, 7) + theta
+fidelities = []
+post_selection_rate = []
+
+for angle in angles:
+    c = make_logical_distillation_circuit(angle)
+    sampler = c.compile_sampler(seed=0)
+    samples = sampler.sample(4_096, batch_size=4_096)
+    
+    post_selected_samples = post_select(samples)
+    post_selection_rate.append(len(post_selected_samples) / len(samples))
+    f = np.count_nonzero(post_selected_samples) / len(post_selected_samples)
+    fidelities.append(1 - f)
+```
+
+```python
+fig, ax1 = plt.subplots()
+
+(line1,) = ax1.semilogy(
+    angles - theta, 1 - np.array(fidelities), "*-", c="g", lw=0.5, label="Infidelity"
+)
+ax1.axvline(0, linestyle="--", lw=0.5)
+ax1.set_xlabel(r"$(\theta - \theta^*)/\pi$")
+ax1.set_ylabel("Infidelity")
+
+ax2 = ax1.twinx()
+(line2,) = ax2.plot(
+    angles - theta,
+    post_selection_rate,
+    ".-",
+    c="orange",
+    lw=0.5,
+    label="Post-selection rate",
+)
+ax2.set_ylabel("Post-selection rate")
+ax2.legend(handles=[line1, line2], loc="lower right");
+```
+
+The output fidelity and post-selection rate are peaked at the distillation angle $\theta^*$.
+
+## Magic State Distillation with Noisy Gates
+
+On a real quantum computer, the distillation circuit itself is noisy. Let's add noise to the distillation circuit:
+
+```python
+noise = p / 5  # Lower noise for distillation gates
+c = tsim.Circuit(
+    f"""
+    # initial state
+    R 0 1 2 3 4
+    R_X({theta}) 0 1 2 3 4
+    T_DAG 0 1 2 3 4
+    DEPOLARIZE1({p}) 0 1 2 3 4
+
+    # distillation with noise
+    DEPOLARIZE1({noise}) 0 1 2 3 4
+    SQRT_X 0 1 4
+    DEPOLARIZE1({noise}) 0 1 4
+    CZ 0 1 2 3
+    DEPOLARIZE2({noise}) 0 1 2 3
+    SQRT_Y 0 3
+    DEPOLARIZE1({noise}) 0 3
+    CZ 0 2 3 4
+    DEPOLARIZE2({noise}) 0 2 3 4
+    TICK
+    SQRT_X_DAG 0
+    DEPOLARIZE1({noise}) 0
+    CZ 0 4 1 3
+    DEPOLARIZE2({noise}) 0 4 1 3
+    TICK
+    SQRT_X_DAG 0 1 2 3 4
+    DEPOLARIZE1({noise}) 0 1 2 3 4
+
+    # undo
+    T 0
+    R_X({-theta}) 0
+
+    M 0 1 2 3 4
+    """
+)
+samples = c.compile_sampler(seed=0).sample(shots=40_000, batch_size=10_000)
+
+post_selected_samples = post_select(samples)
+print(f"Infidelity: {np.count_nonzero(post_selected_samples) / len(post_selected_samples):.5f}")
+```
+
+<Warning>
+The addition of noise reduces the output fidelity to ~96%. This is **worse than the input state**! We need quantum error correction to make distillation beneficial.
+</Warning>
+
+## Encoding with the [17,1,5] Color Code
+
+To make our distillation circuit resilient to noise, we encode it using a quantum error correction code—specifically the **[17,1,5] color code**. Each logical qubit is encoded into 17 physical qubits.
+
+```python
+def make_circuit(basis: Literal["X", "Y", "Z"], p_prep: float, noise: float = 0):
+    encoder = ColorEncoder5()
+    encoder.initialize(
+        f"""
+        R 0 1 2 3 4
+        R_X({theta}) 0 1 2 3 4
+        T_DAG 0 1 2 3 4
+        DEPOLARIZE1({p_prep}) 0 1 2 3 4
+        """,
+    )
+    encoder.encode_transversally(
+        f"""
+        SQRT_X 0 1 4
+        DEPOLARIZE1({noise}) 0 1 4
+        CZ 0 1 2 3
+        DEPOLARIZE2({noise}) 0 1 2 3
+        SQRT_Y 0 3
+        DEPOLARIZE1({noise}) 0 3
+        CZ 0 2 3 4
+        DEPOLARIZE2({noise}) 0 2 3 4
+        TICK
+        SQRT_X_DAG 0
+        DEPOLARIZE1({noise}) 0
+        CZ 0 4
+        DEPOLARIZE2({noise}) 0 4
+        TICK
+        CZ 1 3
+        DEPOLARIZE2({noise}) 1 3
+        TICK
+        SQRT_X_DAG 0 1 2 3 4
+        DEPOLARIZE1({noise}) 0 1 2 3 4
+        """
+        + ("H 0" if basis == "X" else "H_YZ 0" if basis == "Y" else "")
+        + """
+        M 0 1 2 3 4
+        DETECTOR rec[-5]
+        DETECTOR rec[-4]
+        DETECTOR rec[-3]
+        DETECTOR rec[-2]
+        DETECTOR rec[-1]
+        OBSERVABLE_INCLUDE(0) rec[-5]
+        OBSERVABLE_INCLUDE(1) rec[-4]
+        OBSERVABLE_INCLUDE(2) rec[-3]
+        OBSERVABLE_INCLUDE(3) rec[-2]
+        OBSERVABLE_INCLUDE(4) rec[-1]
+        """
+    )
+    return encoder.circuit
+
+c = make_circuit("Z", p_prep=p, noise=p / 10)
+print(f"""Qubits: {c.num_qubits}
+Detectors: {c.num_detectors}
+Observables: {c.num_observables}""")
+```
+
+The full circuit now contains **85 qubits**: 5 logical qubits, constructed from 17 physical qubits each.
+
+## The Full Encoded Protocol
+
+<Steps>
+  <Step title="Prepare 5 encoded magic states">
+    Each at 97% fidelity. We assume noiseless encoding for simplicity.
+  </Step>
+  
+  <Step title="Distill into a single logical qubit">
+    Using transversal encoding of the distillation circuit with depolarization noise.
+  </Step>
+  
+  <Step title="Post-selection">
+    - Post-select on perfect stabilizers
+    - Post-select on the `[1,0,1,1]` distillation syndrome
+  </Step>
+  
+  <Step title="Quantum state tomography">
+    Estimate the output magic state fidelity by measuring in X, Y, and Z bases.
+  </Step>
+</Steps>
+
+### Sampling and Post-Selection
+
+```python
+def sample_and_post_select(circ: tsim.Circuit, shots: int = 15_000):
+    sampler = circ.compile_detector_sampler(seed=42)
+    
+    det_samples, obs_samples = sampler.sample(
+        shots=shots, batch_size=shots, separate_observables=True
+    )
+    
+    # Post-select on perfect stabilizers
+    perfect_stabilizers = np.all(det_samples == 0, axis=1)
+    obs_samples = obs_samples[perfect_stabilizers]
+    
+    post_selected_observables = post_select(obs_samples)
+    p1 = np.count_nonzero(post_selected_observables) / len(post_selected_observables)
+    eval = 1 - 2 * p1
+    print(f"Expectation value: {eval:.4f}, percentage kept: {len(post_selected_observables) / shots * 100:.2f}%")
+    return eval
+```
+
+### Quantum State Tomography
+
+We measure the logical qubit in three bases (X, Y, Z) to reconstruct the density matrix:
+
+```python
+circ_x, circ_y, circ_z = (
+    make_circuit("X", p, p / 5),
+    make_circuit("Y", p, p / 5),
+    make_circuit("Z", p, p / 5),
+)
+vx = sample_and_post_select(circ_x)
+vy = sample_and_post_select(circ_y)
+vz = sample_and_post_select(circ_z)
+```
+
+<Note>
+It would be **impossible** to simulate an 85-qubit circuit using a state vector simulator. But with tsim, we can compute hundreds of thousands of shots in a few seconds!
+</Note>
+
+### Computing Fidelity
+
+Construct the density matrix from the measured expectation values:
+
+```python
+id = np.eye(2)
+x = np.array([[0, 1], [1, 0]])
+y = np.array([[0, -1j], [1j, 0]])
+z = np.array([[1, 0], [0, -1]])
+
+rho = (id + vx * x + vy * y + vz * z) / 2
+```
+
+Compute the expected magic state:
+
+```python
+a = theta * np.pi
+rx = np.array(
+    [[np.cos(a / 2), -1j * np.sin(a / 2)], [-1j * np.sin(a / 2), np.cos(a / 2)]]
+)
+t_dag = np.array([[1, 0], [0, np.exp(-1j * np.pi / 4)]])
+psi_expected = t_dag @ rx @ np.array([1, 0])
+```
+
+Calculate fidelity as $\langle\psi_{expected}|\rho|\psi_{expected}\rangle$:
+
+```python
+fidelity = psi_expected.conj().T @ rho @ psi_expected
+print(f"Infidelity: {1 - fidelity.real:.5f}")
+```
+
+## Results
+
+The overall fidelity has increased from **97%** of the individual encoded magic states to **98.5%** of the output logical qubit, despite the presence of noise in the distillation circuit. This demonstrates the power of quantum error correction!
+
+## Key Takeaways
+
+- How to model noisy magic states and simulate fidelities using tsim
+- How to perform magic state distillation and post-selection
+- How to encode a distillation circuit using the [17,1,5] color code
+- How to simulate hundreds of thousands of shots of an 85-qubit circuit within seconds on a laptop
+- How magic state distillation can improve fidelity even when the distillation circuit is noisy itself

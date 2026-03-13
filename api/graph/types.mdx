@@ -1,0 +1,284 @@
+---
+title: Core Types
+description: Data structures representing compilation stages
+---
+
+The core types module defines immutable data structures that represent different stages of the circuit compilation pipeline. These types flow through the preparation → compilation → sampling workflow.
+
+## Compilation Pipeline Types
+
+### SamplingGraph
+
+```python
+@dataclass(frozen=True)
+class SamplingGraph:
+    graph: BaseGraph
+    error_transform: np.ndarray
+    channel_probs: list[np.ndarray]
+    num_outputs: int
+    num_detectors: int
+```
+
+Result of the graph preparation phase for sampling.
+
+This represents a circuit that has been:
+1. Parsed from stim format
+2. Converted to a ZX graph
+3. Doubled (composed with adjoint)
+4. Reduced via `zx.full_reduce`
+5. Had its error basis transformed (Gaussian elimination: e → f)
+
+<ResponseField name="graph" type="BaseGraph">
+  The prepared ZX graph with f-parameters on vertices
+</ResponseField>
+
+<ResponseField name="error_transform" type="np.ndarray">
+  Binary matrix of shape `(num_f, num_e)` where entry `[i, j] = 1` means `f_i` depends on `e_j` (i.e., `f_i = XOR of e_j where matrix[i,j] = 1`)
+</ResponseField>
+
+<ResponseField name="channel_probs" type="list[np.ndarray]">
+  List of probability arrays for error channels from the original circuit
+</ResponseField>
+
+<ResponseField name="num_outputs" type="int">
+  Number of output vertices (measurements or detectors)
+</ResponseField>
+
+<ResponseField name="num_detectors" type="int">
+  Number of detector vertices (0 for measurement sampling)
+</ResponseField>
+
+**Example**
+
+```python
+from tsim import Circuit
+from tsim.core.graph import prepare_graph
+
+circuit = Circuit("""
+    X_ERROR(0.01) 0
+    H 0
+    CNOT 0 1
+    M 0 1
+""")
+
+# Prepare graph for measurement sampling
+sampling_graph = prepare_graph(circuit, sample_detectors=False)
+
+print(f"Outputs: {sampling_graph.num_outputs}")
+print(f"Detectors: {sampling_graph.num_detectors}")
+print(f"Error channels: {len(sampling_graph.channel_probs)}")
+print(f"Error transform: {sampling_graph.error_transform.shape}")
+```
+
+**Pipeline Position**
+
+```
+Circuit → [prepare_graph] → SamplingGraph → [compile_program] → CompiledProgram
+```
+
+---
+
+### CompiledComponent
+
+```python
+class CompiledComponent(eqx.Module):
+    output_indices: tuple[int, ...]
+    f_selection: Array
+    compiled_scalar_graphs: tuple[CompiledScalarGraphs, ...]
+```
+
+A single compiled connected component of a circuit.
+
+Each component is independent and can be sampled separately. The results are then combined according to `output_indices`.
+
+<ResponseField name="output_indices" type="tuple[int, ...]">
+  Which global output indices this component owns. Used to reassemble component outputs into the final result.
+</ResponseField>
+
+<ResponseField name="f_selection" type="Array">
+  Indices into the global f_params array to select this component's required f-parameters. Shape: `(num_f_for_component,)`
+</ResponseField>
+
+<ResponseField name="compiled_scalar_graphs" type="tuple[CompiledScalarGraphs, ...]">
+  Compiled circuits for sampling. For sequential mode:
+  - `compiled_scalar_graphs[0]`: Normalization (no outputs plugged)
+  - `compiled_scalar_graphs[i]`: First i outputs plugged
+  
+  For joint mode:
+  - `compiled_scalar_graphs[0]`: Normalization
+  - `compiled_scalar_graphs[1]`: All outputs plugged
+</ResponseField>
+
+**Example**
+
+```python
+from tsim.compile.pipeline import compile_program
+
+# Compile a prepared graph
+compiled_program = compile_program(sampling_graph)
+
+for i, component in enumerate(compiled_program.components):
+    print(f"Component {i}:")
+    print(f"  Outputs: {component.output_indices}")
+    print(f"  F-params needed: {len(component.f_selection)}")
+    print(f"  Circuits: {len(component.compiled_scalar_graphs)}")
+```
+
+**Attributes (Static)**
+
+The `output_indices` field is marked as `static=True` in equinox, meaning it's treated as metadata rather than array data during JIT compilation.
+
+---
+
+### CompiledProgram
+
+```python
+@dataclass(frozen=True)
+class CompiledProgram:
+    components: tuple[CompiledComponent, ...]
+    output_order: Array
+    num_outputs: int
+    num_f_params: int
+    num_detectors: int
+```
+
+A fully compiled circuit program ready for sampling.
+
+This is the result of compiling a `SamplingGraph` and contains everything needed to sample from the circuit.
+
+<ResponseField name="components" type="tuple[CompiledComponent, ...]">
+  The compiled components, sorted by number of outputs for efficient parallel sampling
+</ResponseField>
+
+<ResponseField name="output_order" type="Array">
+  Array for reordering component outputs to final order. Use as: `final_samples = combined[:, np.argsort(output_order)]`
+</ResponseField>
+
+<ResponseField name="num_outputs" type="int">
+  Total number of outputs across all components
+</ResponseField>
+
+<ResponseField name="num_f_params" type="int">
+  Total number of f-parameters after basis reduction
+</ResponseField>
+
+<ResponseField name="num_detectors" type="int">
+  Number of detector outputs (for detector sampling)
+</ResponseField>
+
+**Example**
+
+```python
+from tsim import Circuit
+from tsim.core.graph import prepare_graph
+from tsim.compile.pipeline import compile_program
+
+circuit = Circuit("""
+    X_ERROR(0.01) 0 1
+    H 0 1
+    CNOT 0 1
+    M 0 1
+""")
+
+# Full compilation pipeline
+sampling_graph = prepare_graph(circuit, sample_detectors=False)
+compiled = compile_program(sampling_graph)
+
+print(f"Total outputs: {compiled.num_outputs}")
+print(f"F-parameters: {compiled.num_f_params}")
+print(f"Components: {len(compiled.components)}")
+
+# Now ready for sampling
+from tsim import MeasurementSampler
+
+sampler = MeasurementSampler(circuit)
+samples = sampler.sample(num_samples=1000, seed=0)
+```
+
+**Pipeline Position**
+
+```
+SamplingGraph → [compile_program] → CompiledProgram → [sampler.sample] → samples
+```
+
+---
+
+## Type Relationships
+
+### Compilation Flow
+
+The types represent distinct stages in the compilation pipeline:
+
+```python
+# Stage 1: Preparation
+circuit: Circuit
+↓ prepare_graph()
+sampling_graph: SamplingGraph  # ZX graph + error transform
+
+# Stage 2: Compilation
+↓ compile_program()
+compiled_program: CompiledProgram  # Contains CompiledComponents
+  ├─ component_0: CompiledComponent
+  ├─ component_1: CompiledComponent
+  └─ ...
+
+# Stage 3: Sampling
+↓ sampler.sample()
+samples: np.ndarray  # Output bitstrings
+```
+
+### Component Independence
+
+Components are created from connected subgraphs:
+
+```python
+from tsim.core.graph import connected_components
+
+# Decompose graph into independent parts
+components = connected_components(sampling_graph.graph)
+
+# Each component can be compiled separately
+for comp in components:
+    print(f"Independent outputs: {comp.output_indices}")
+    # comp.graph is a standalone ZX graph
+```
+
+---
+
+## Immutability
+
+All types in this module are immutable:
+
+- `SamplingGraph` and `CompiledProgram` use `@dataclass(frozen=True)`
+- `CompiledComponent` is an `eqx.Module` with immutable arrays
+
+This ensures:
+- Thread safety for parallel sampling
+- Safe caching and JIT compilation
+- Predictable behavior across the pipeline
+
+**Example: Safe Reuse**
+
+```python
+# Compiled programs can be reused safely
+compiled = compile_program(sampling_graph)
+
+# Multiple samplers can share the same compiled program
+import concurrent.futures
+
+def sample_batch(seed):
+    sampler = MeasurementSampler.from_compiled(compiled)
+    return sampler.sample(num_samples=1000, seed=seed)
+
+with concurrent.futures.ThreadPoolExecutor() as executor:
+    results = list(executor.map(sample_batch, range(10)))
+```
+
+---
+
+## See Also
+
+- [Graph Construction](/api/graph/graph-construction) - Building and preparing graphs
+- [Compilation Pipeline](/api/compilation/pipeline) - Compiling graphs for sampling
+- [Measurement Sampler](/api/compiled-measurement-sampler) - Using compiled programs for sampling
+- [Detector Sampler](/api/compiled-detector-sampler) - Sampling detectors and observables

@@ -1,0 +1,365 @@
+---
+title: Noise Channels
+description: Pauli noise channels and error sampling infrastructure
+---
+
+## Overview
+
+The `tsim.noise.channels` module provides a comprehensive framework for modeling and sampling from quantum error channels. It includes probability distributions for Pauli errors, channel simplification algorithms, and an efficient sampler optimized for low-noise regimes.
+
+## Channel
+
+<ParamField path="Channel" type="dataclass">
+  A probability distribution over error outcomes.
+
+  <ResponseField name="probs" type="np.ndarray">
+    Shape `(2^k,)` probability array, sums to 1, dtype float64
+  </ResponseField>
+
+  <ResponseField name="unique_col_ids" type="tuple[int, ...]">
+    Tuple of column IDs, where each ID corresponds to a bit of the channel
+  </ResponseField>
+
+  <ResponseField name="num_bits" type="int" property>
+    Number of bits in the channel (k where probs has shape 2^k)
+  </ResponseField>
+</ParamField>
+
+```python
+from tsim.noise.channels import Channel
+import numpy as np
+
+# Create a simple 2-bit channel
+probs = np.array([0.7, 0.1, 0.1, 0.1])  # 4 outcomes for 2 bits
+channel = Channel(probs=probs, unique_col_ids=(0, 1))
+print(channel.num_bits)  # Output: 2
+```
+
+## Probability Functions
+
+### error_probs
+
+```python
+def error_probs(p: float) -> np.ndarray
+```
+
+Single-bit error channel.
+
+<ParamField path="p" type="float">
+  Error probability
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  Shape `(2,)` array with probabilities `[1-p, p]`
+</ResponseField>
+
+```python
+from tsim.noise.channels import error_probs
+
+probs = error_probs(0.1)
+print(probs)  # [0.9, 0.1]
+```
+
+### pauli_channel_1_probs
+
+```python
+def pauli_channel_1_probs(px: float, py: float, pz: float) -> np.ndarray
+```
+
+Single-qubit Pauli channel.
+
+<ParamField path="px" type="float">
+  Probability of X error
+</ParamField>
+
+<ParamField path="py" type="float">
+  Probability of Y error
+</ParamField>
+
+<ParamField path="pz" type="float">
+  Probability of Z error
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  Shape `(4,)` array in order `[I, Z, X, Y]` mapped to bits `[00, 01, 10, 11]`
+</ResponseField>
+
+```python
+from tsim.noise.channels import pauli_channel_1_probs
+
+# Depolarizing channel with equal error rates
+probs = pauli_channel_1_probs(0.01, 0.01, 0.01)
+print(probs)  # [0.97, 0.01, 0.01, 0.01] -> [I, Z, X, Y]
+```
+
+### pauli_channel_2_probs
+
+```python
+def pauli_channel_2_probs(
+    pix: float, piy: float, piz: float,
+    pxi: float, pxx: float, pxy: float, pxz: float,
+    pyi: float, pyx: float, pyy: float, pyz: float,
+    pzi: float, pzx: float, pzy: float, pzz: float
+) -> np.ndarray
+```
+
+Two-qubit Pauli channel.
+
+<ParamField path="pij" type="float">
+  Probability of error i on qubit 0 and error j on qubit 1, where i,j ∈ {I, X, Y, Z}
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  Shape `(16,)` array with probabilities for all 16 two-qubit Pauli operators
+</ResponseField>
+
+```python
+from tsim.noise.channels import pauli_channel_2_probs
+
+# Two-qubit channel with only IX and XI errors
+probs = pauli_channel_2_probs(
+    pix=0.01, piy=0.0, piz=0.0,
+    pxi=0.01, pxx=0.0, pxy=0.0, pxz=0.0,
+    pyi=0.0, pyx=0.0, pyy=0.0, pyz=0.0,
+    pzi=0.0, pzx=0.0, pzy=0.0, pzz=0.0
+)
+```
+
+### correlated_error_probs
+
+```python
+def correlated_error_probs(probabilities: list[float]) -> np.ndarray
+```
+
+Build probability distribution for correlated error chain.
+
+Given conditional probabilities `[p1, p2, ..., pk]` from a chain of
+`CORRELATED_ERROR(p1) ELSE_CORRELATED_ERROR(p2) ... ELSE_CORRELATED_ERROR(pk)`,
+computes the joint probability distribution over 2^k outcomes.
+
+Since errors are mutually exclusive, only outcomes with at most one bit set have non-zero probability:
+- `P(0) = (1-p1)(1-p2)...(1-pk)` (no error)
+- `P(2^i) = (1-p1)...(1-p_i) * p_{i+1}` (error i+1 occurred)
+
+<ParamField path="probabilities" type="list[float]">
+  List of conditional probabilities `[p1, p2, ..., pk]`
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  Array of shape `(2^k,)` with probabilities for each outcome
+</ResponseField>
+
+```python
+from tsim.noise.channels import correlated_error_probs
+
+# Chain of 3 correlated errors
+probs = correlated_error_probs([0.1, 0.2, 0.3])
+# Only outcomes 0, 1, 2, 4 have non-zero probability
+```
+
+## Channel Operations
+
+### xor_convolve
+
+```python
+def xor_convolve(probs_a: np.ndarray, probs_b: np.ndarray) -> np.ndarray
+```
+
+XOR convolution of two probability distributions.
+
+Computes `P(A XOR B = o) = sum_{a ^ b = o} P(A=a) * P(B=b)`
+
+<ParamField path="probs_a" type="np.ndarray">
+  Shape `(2^k,)` probabilities for channel A
+</ParamField>
+
+<ParamField path="probs_b" type="np.ndarray">
+  Shape `(2^k,)` probabilities for channel B (same size as A)
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  Shape `(2^k,)` probabilities for the combined channel
+</ResponseField>
+
+```python
+from tsim.noise.channels import error_probs, xor_convolve
+
+# Combine two independent bit-flip channels
+probs_a = error_probs(0.1)
+probs_b = error_probs(0.2)
+combined = xor_convolve(probs_a, probs_b)
+```
+
+## Channel Simplification
+
+### reduce_null_bits
+
+```python
+def reduce_null_bits(
+    channels: list[Channel],
+    null_col_id: int | None = None
+) -> list[Channel]
+```
+
+Remove bits corresponding to the null column (all-zero column).
+
+<ParamField path="channels" type="list[Channel]">
+  List of channels
+</ParamField>
+
+<ParamField path="null_col_id" type="int | None">
+  Column ID representing the all-zero column, or None if there is no all-zero column
+</ParamField>
+
+<ResponseField name="return" type="list[Channel]">
+  List of channels with null bits marginalized out. Channels with all null entries are removed entirely.
+</ResponseField>
+
+### normalize_channels
+
+```python
+def normalize_channels(channels: list[Channel]) -> list[Channel]
+```
+
+Normalize channels by sorting unique_col_ids, permuting probs accordingly.
+
+<ParamField path="channels" type="list[Channel]">
+  List of channels
+</ParamField>
+
+<ResponseField name="return" type="list[Channel]">
+  List of channels with sorted unique_col_ids
+</ResponseField>
+
+### merge_identical_channels
+
+```python
+def merge_identical_channels(channels: list[Channel]) -> list[Channel]
+```
+
+Merge all channels with identical signature sets.
+
+<ParamField path="channels" type="list[Channel]">
+  List of channels
+</ParamField>
+
+<ResponseField name="return" type="list[Channel]">
+  List with at most one channel per unique signature set
+</ResponseField>
+
+### absorb_subset_channels
+
+```python
+def absorb_subset_channels(channels: list[Channel], max_bits: int = 4) -> list[Channel]
+```
+
+Absorb channels whose signatures are subsets of others.
+
+<ParamField path="channels" type="list[Channel]">
+  List of channels
+</ParamField>
+
+<ParamField path="max_bits" type="int" default="4">
+  Maximum number of bits allowed per channel
+</ParamField>
+
+<ResponseField name="return" type="list[Channel]">
+  List with no channel being a strict subset of another
+</ResponseField>
+
+### simplify_channels
+
+```python
+def simplify_channels(
+    channels: list[Channel],
+    max_bits: int = 4,
+    null_col_id: int | None = None
+) -> list[Channel]
+```
+
+Simplify channels by removing null columns, merging identical and absorbing subsets.
+
+<ParamField path="channels" type="list[Channel]">
+  List of channels to simplify
+</ParamField>
+
+<ParamField path="max_bits" type="int" default="4">
+  Maximum number of bits allowed per channel
+</ParamField>
+
+<ParamField path="null_col_id" type="int | None">
+  Column ID representing the all-zero column, or None if there is no all-zero column
+</ParamField>
+
+<ResponseField name="return" type="list[Channel]">
+  Simplified list of channels
+</ResponseField>
+
+## ChannelSampler
+
+```python
+class ChannelSampler:
+    def __init__(
+        self,
+        channel_probs: list[np.ndarray],
+        error_transform: np.ndarray,
+        seed: int | None = None,
+    )
+```
+
+Samples from multiple error channels and transforms to a reduced basis.
+
+This class combines multiple error channels (each producing error bits e0, e1, ...) and applies a linear transformation over GF(2) to convert samples from the original "e" basis to a reduced "f" basis using geometric-skip sampling optimized for low-noise regimes.
+
+`f_i = error_transform_ij * e_j mod 2`
+
+Channels are automatically simplified by:
+1. Removing bits e_i that do not affect any f-variable (i.e. all-zero columns in error_transform)
+2. Merging channels with identical column signatures
+3. Absorbing channels whose signatures are subsets of others
+
+<ParamField path="channel_probs" type="list[np.ndarray]">
+  List of probability arrays. Channel i has shape `(2^k_i,)` and produces k_i error bits starting at index sum(k_0:k_{i-1}). For example, if channels have shapes `[(4,), (2,), (4,)]`, they produce variables `[e0,e1]`, `[e2]`, `[e3,e4]`.
+</ParamField>
+
+<ParamField path="error_transform" type="np.ndarray">
+  Binary matrix of shape `(num_f, num_e)` where entry `[i, j] = 1` means f_i depends on e_j. For example, if row 0 is `[0, 1, 0, 1]`, then `f0 = e1 XOR e3`.
+</ParamField>
+
+<ParamField path="seed" type="int | None" default="None">
+  Random seed for sampling. If None, a random seed is generated.
+</ParamField>
+
+### sample
+
+```python
+def sample(self, num_samples: int = 1) -> np.ndarray
+```
+
+Sample from all error channels and transform to new error basis.
+
+Uses geometric-skip sampling, optimized for low-noise regimes where P(non-identity) is much less than 1 per channel.
+
+<ParamField path="num_samples" type="int" default="1">
+  Number of samples to draw
+</ParamField>
+
+<ResponseField name="return" type="np.ndarray">
+  NumPy array of shape `(num_samples, num_f)` with uint8 values indicating which f-variables are set for each sample
+</ResponseField>
+
+```python
+from tsim.noise.channels import ChannelSampler, error_probs
+import numpy as np
+
+# Create two 1-bit channels
+probs = [error_probs(0.1), error_probs(0.2)]
+
+# Transform: f0 = e0 XOR e1
+transform = np.array([[1, 1]])
+
+sampler = ChannelSampler(probs, transform, seed=42)
+samples = sampler.sample(1000)  # shape (1000, 1)
+
+print(f"Error rate: {samples.mean():.3f}")  # ~0.28 = 0.1 + 0.2 - 2*0.1*0.2
+```

@@ -1,0 +1,119 @@
+---
+title: Evaluation
+description: API reference for evaluating compiled circuits using exact arithmetic
+---
+
+The evaluation module provides exact arithmetic evaluation of compiled scalar graphs, computing quantum amplitudes with precise phase and scalar handling.
+
+## evaluate
+
+```python
+@jax.jit
+def evaluate(
+    circuit: CompiledScalarGraphs,
+    param_vals: Array
+) -> Array
+```
+
+Evaluate compiled circuit with batched parameter values.
+
+This function computes quantum amplitudes using exact arithmetic for phases and scalars. It processes four types of terms:
+- **Type A**: Node terms (1 + e^(iα))
+- **Type B**: Half-pi terms (e^(iβ))
+- **Type C**: Pi-pair terms (-1)^(Ψ·Φ)
+- **Type D**: Phase pairs (1 + e^a + e^b - e^γ)
+
+<ParamField path="circuit" type="CompiledScalarGraphs" required>
+  Compiled circuit representation containing parameter masks, phase constants, and term counts
+</ParamField>
+
+<ParamField path="param_vals" type="Array" required>
+  Binary parameter values (error bits + measurement/detector outcomes), shape `(batch_size, n_params)`
+</ParamField>
+
+<ResponseField name="return" type="Array">
+  Complex array of shape `(batch_size,)` containing the amplitudes of the circuit evaluated with the given binary parameter values
+</ResponseField>
+
+### Example
+
+```python
+import jax.numpy as jnp
+from tsim.compile.evaluate import evaluate
+
+# Assume we have a compiled circuit
+circuit = compiled_component.compiled_scalar_graphs[0]
+
+# Create binary parameter values (batch of 1000 samples)
+batch_size = 1000
+n_params = 10
+param_vals = jnp.array([[0, 1, 0, 1, 1, 0, 0, 1, 0, 1]] * batch_size)
+
+# Evaluate to get amplitudes
+amplitudes = evaluate(circuit, param_vals)
+print(amplitudes.shape)  # (1000,)
+print(amplitudes.dtype)  # complex64 or complex128
+```
+
+### Batched Evaluation
+
+```python
+# Evaluate multiple parameter configurations efficiently
+param_vals = jnp.array([
+    [0, 0, 0, 1, 1, 0, 1, 0, 1, 1],
+    [1, 0, 1, 0, 0, 1, 1, 0, 0, 1],
+    [0, 1, 1, 0, 1, 0, 0, 1, 1, 0],
+])
+
+amplitudes = evaluate(circuit, param_vals)
+# Returns shape (3,) with complex amplitudes
+```
+
+## Implementation Details
+
+### Exact Arithmetic
+
+The `evaluate` function uses exact arithmetic to avoid numerical errors:
+
+- Phases are represented as powers of ω = e^(iπ/4)
+- Scalars use `ExactScalarArray` with integer coefficients
+- Binary operations computed via GF(2) matrix multiplication
+
+### Performance
+
+- JIT-compiled with `@jax.jit` for optimal performance
+- Batched evaluation over parameter values
+- Uses float32 matmul for CPU performance, then casts to uint8
+- Efficient for large batch sizes
+
+### Parameter Structure
+
+The `param_vals` array combines:
+1. **Error bits**: Binary indicators for error parameters (f-parameters)
+2. **Measurement outcomes**: Binary measurement results (m-parameters)
+3. **Detector outcomes**: Binary detector results (d-parameters)
+
+The total number of parameters depends on the circuit structure and is determined during compilation.
+
+## Related Types
+
+### CompiledScalarGraphs
+
+Contains the compiled representation with:
+- `a_param_bits`, `a_const_phases`, `a_num_terms`: Type A term data
+- `b_param_bits`, `b_term_types`: Type B term data
+- `c_const_bits_a`, `c_const_bits_b`, `c_param_bits_a`, `c_param_bits_b`: Type C term data
+- `d_param_bits_a`, `d_param_bits_b`, `d_const_alpha`, `d_const_beta`, `d_num_terms`: Type D term data
+- `phase_indices`: Static phase indices
+- `floatfactor`, `approximate_floatfactors`: Normalization factors
+- `power2`: Power-of-2 scaling factor
+- `has_approximate_floatfactors`: Flag for approximate evaluation mode
+
+### ExactScalarArray
+
+Represents exact complex scalars as:
+```
+value = (c₀ + c₁·ω + c₂·ω² + c₃·ω³) · 2^power
+```
+
+where ω = e^(iπ/4) and coefficients are integers.

@@ -1,0 +1,284 @@
+---
+title: 'ZX-Calculus'
+description: 'The graphical language powering tsim'
+---
+
+## Introduction to ZX-Calculus
+
+The ZX-calculus is a **graphical language** for reasoning about quantum computations. Instead of representing quantum circuits as sequences of matrix operations, ZX-calculus represents them as graphs where:
+
+- **Vertices (spiders)** represent quantum operations
+- **Edges (wires)** represent quantum systems flowing through the computation  
+- **Colors** distinguish between Z-basis (green) and X-basis (red) operations
+- **Phases** parameterize rotations and measurements
+
+tsim uses the ZX-calculus as its internal representation because it enables powerful **graph rewrite rules** that simplify quantum circuits while preserving their behavior.
+
+<Note>
+tsim uses the [PyZX](https://github.com/Quantomatic/pyzx) library (specifically `pyzx_param`) for ZX-graph manipulation and simplification.
+</Note>
+
+## Basic Elements
+
+### Spiders
+
+The fundamental elements in ZX-calculus are **spiders** - vertices with a color, phase, and arbitrary number of connections:
+
+<CardGroup cols={2}>
+  <Card title="Z-Spider (Green)" icon="circle" color="#22c55e">
+    Represents Z-basis operations: measurements, Z rotations, controlled-Z gates
+  </Card>
+  <Card title="X-Spider (Red)" icon="circle" color="#ef4444">
+    Represents X-basis operations: X rotations, Hadamard connections
+  </Card>
+</CardGroup>
+
+Mathematically, a Z-spider with phase $\alpha$ and $n$ legs corresponds to the operation:
+
+$$
+|0\rangle\langle 0|^{\otimes n} + e^{i\alpha\pi}|1\rangle\langle 1|^{\otimes n}
+$$
+
+An X-spider is obtained by conjugating with Hadamard gates (rotating to the X-basis).
+
+### Hadamard Edges
+
+A **Hadamard edge** (shown as a yellow box or dashed line) connects X and Z spiders, representing a Hadamard transformation between bases.
+
+### Example: Common Gates in ZX-Calculus
+
+<AccordionGroup>
+  <Accordion title="CNOT Gate">
+    A CNOT (controlled-X) gate is represented as:
+    ```
+    control qubit: ─●─   (Z-spider with phase 0, degree 2)
+                    │
+    target qubit:  ─⊕─   (X-spider with phase 0, degree 2)
+    ```
+    The control is a Z-spider because CNOT is controlled in the Z-basis, while the target is an X-spider because it applies an X operation.
+  </Accordion>
+  
+  <Accordion title="Hadamard Gate">
+    A Hadamard gate connects the Z and X bases:
+    ```
+    ─●─[H]─⊕─
+    ```
+    Where `[H]` represents a Hadamard edge between a Z-spider and X-spider.
+  </Accordion>
+  
+  <Accordion title="Z Rotation (including T gate)">
+    A Z rotation by angle $\alpha\pi$ is a single Z-spider with phase $\alpha$:
+    ```
+    ───●(α)───
+    ```
+    For the T gate specifically, $\alpha = 1/4$ (a π/4 rotation).
+  </Accordion>
+  
+  <Accordion title="X Rotation">
+    An X rotation is represented as an X-spider with the appropriate phase:
+    ```
+    ───⊕(α)───
+    ```
+    This appears in tsim when you use the `R_X` instruction.
+  </Accordion>
+</AccordionGroup>
+
+## Graph Rewrite Rules
+
+The power of ZX-calculus comes from **rewrite rules** that transform graphs while preserving their quantum behavior. These rules enable significant simplification of quantum circuits.
+
+### Spider Fusion
+
+Two spiders of the **same color** connected by a regular edge can be fused into a single spider:
+
+```
+●(α)─────●(β)  ⟹  ●(α+β)
+```
+
+The phases add together. This is one of the most fundamental simplification rules.
+
+<Info>
+In tsim's code, spider fusion happens during `zx.full_reduce()` calls (see `graph.py:466`, `pipeline.py:128`). This can dramatically reduce the size of the graph.
+</Info>
+
+### Identity Removal
+
+Spiders with phase 0 and degree 2 (straight wires) can be removed:
+
+```
+───●(0)───  ⟹  ─────
+```
+
+### Hopf Law
+
+A Hadamard edge between two spiders can be "pushed through" in certain configurations:
+
+```
+●──[H]──⊕  ⟹  ⊕──[H]──●
+```
+
+This allows Hadamard gates to be moved around the circuit, potentially enabling other simplifications.
+
+### Copy and Deletion
+
+Z-spiders can copy Z-basis states (computational basis):
+
+```
+    │
+  ──●──  copies |0⟩ ⟼ |00⟩ and |1⟩ ⟼ |11⟩
+    │
+```
+
+X-spiders do the same in the X-basis (Hadamard basis).
+
+## How tsim Uses ZX-Calculus
+
+### 1. Circuit to Graph Conversion
+
+When you create a `Circuit`, each gate is converted to its ZX representation (`instructions.py`). For example:
+
+```python
+def t(b: GraphRepresentation, qubit: int) -> None:
+    """Apply T gate (π/4 Z rotation)."""
+    z_phase(b, qubit, Fraction(1, 4))  # Creates Z-spider with phase 1/4
+```
+
+The result is a ZX-graph representing the entire circuit.
+
+### 2. Simplification via Rewrite Rules
+
+tsim applies `zx.full_reduce()` at multiple stages:
+
+- After initial circuit construction
+- During the preparation phase (`graph.py:466`)
+- After each stabilizer rank decomposition step (`stabrank.py:23`)
+- Before compiling each component (`pipeline.py:128`)
+
+These simplifications can reduce a graph with hundreds of spiders down to dozens, significantly improving compilation and sampling speed.
+
+### 3. Sampling Graph Construction
+
+To compute measurement probabilities, tsim constructs a special graph (`graph.py:146`):
+
+```python
+def build_sampling_graph(built: GraphRepresentation, sample_detectors: bool = False) -> BaseGraph:
+    """Build a ZX graph for sampling from a GraphRepresentation."""
+    g = built.graph.copy()
+    
+    # ... setup inputs/outputs ...
+    
+    # Compose circuit with its adjoint (complex conjugate transpose)
+    g_adj = g.adjoint()
+    g.compose(g_adj)
+    
+    # ... add measurement/detector outputs ...
+```
+
+Composing a graph with its adjoint gives you $U^\dagger U$, which when sandwiched with states gives $\langle\psi|U^\dagger U|\psi\rangle$ - exactly what we need for computing probabilities.
+
+### 4. Parametric Phases for Noise
+
+tsim extends standard ZX-calculus with **parametric phases** to handle noise channels. Instead of numeric phases like $\alpha = 0.25$, spiders can have symbolic phases like $\alpha = e_0 + e_1$ where $e_i$ are error bits.
+
+When a Pauli error channel is applied, the error bits determine which error occurred:
+
+```python
+# From channels.py - simplified
+def x_error(b: GraphRepresentation, qubit: int, p: float) -> None:
+    """Apply X error with probability p."""
+    error_idx = len(b.channel_probs)
+    b.channel_probs.append(np.array([1-p, p]))
+    
+    # Add X-spider with parametric phase e_i
+    x_phase(b, qubit, f"e{error_idx}")
+```
+
+Later, during sampling, these error bits are sampled from their probability distributions and propagated through the graph to determine measurement outcomes.
+
+## ZX-Calculus and Clifford Circuits
+
+Clifford circuits have special structure in ZX-calculus:
+
+<Info>
+**Clifford graphs** contain only spiders with phases that are multiples of $\pi/2$: 0, π/2, π, 3π/2.
+
+These graphs can be dramatically simplified using ZX rewrite rules, often reducing to nearly trivial forms.
+</Info>
+
+This is why Stim (which only handles Clifford circuits) is so efficient - Clifford circuits have special structure that enables fast simulation via the **stabilizer formalism**.
+
+tsim leverages this by decomposing non-Clifford gates into sums of Clifford circuits, then simplifying each Clifford component using ZX-calculus rules.
+
+## Visualizing ZX-Graphs
+
+You can visualize the ZX-graph representation of your circuits:
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    H 0
+    CNOT 0 1  
+    T 0
+    M 0 1
+""")
+
+# View the circuit graph
+c.diagram("pyzx")
+
+# View the sampling graph (composed with adjoint)
+c.diagram("pyzx-meas")
+```
+
+The visualization shows:
+- Green circles: Z-spiders
+- Red circles: X-spiders  
+- Lines: Quantum wires
+- Yellow boxes: Hadamard edges
+- Numbers: Phase values
+
+## Mathematical Foundation
+
+Formally, ZX-calculus is a **category-theoretic** framework where:
+
+- **Objects** are natural numbers (representing tensor product dimensions)
+- **Morphisms** are ZX-diagrams (representing quantum operations)
+- **Composition** is vertical stacking (sequential operations)
+- **Tensor product** is horizontal placement (parallel operations)
+
+The rewrite rules form a **complete axiomatization** for Clifford+T quantum mechanics, meaning any two diagrams representing the same quantum operation can be proven equal using the rewrite rules (up to scalar factors).
+
+<Note>
+For a rigorous treatment, see [Coecke and Kissinger (2017)](https://www.cambridge.org/core/books/picturing-quantum-processes/1119568B3101F3A685BE832FEEC53E52) "Picturing Quantum Processes" or the original [ZX-calculus paper](https://arxiv.org/abs/0906.4725).
+</Note>
+
+## Advantages for Circuit Simulation
+
+Why does tsim use ZX-calculus instead of traditional matrix representations?
+
+✅ **Automatic simplification**: Rewrite rules discover optimizations that would be hard to find in matrix form
+
+✅ **Compositionality**: Easy to compose circuits, take adjoints, and manipulate subcircuits
+
+✅ **Sparse representation**: Only active operations are represented; identity wires are implicit
+
+✅ **Noise integration**: Parametric phases naturally represent probabilistic error channels
+
+✅ **Visual debugging**: Graph structure makes it easier to understand and debug circuit behavior
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Stabilizer Rank" icon="layer-group" href="/concepts/stabilizer-rank">
+    Learn how non-Clifford gates are decomposed into Clifford components
+  </Card>
+  <Card title="Non-Clifford Gates" icon="calculator" href="/concepts/non-clifford-gates">
+    Explore the non-Clifford gates tsim supports
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/concepts/overview">
+    See how ZX-calculus fits into tsim's compilation pipeline
+  </Card>
+  <Card title="PyZX Documentation" icon="book" href="https://pyzx.readthedocs.io/">
+    Dive deeper into the PyZX library
+  </Card>
+</CardGroup>

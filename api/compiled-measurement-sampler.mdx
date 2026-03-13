@@ -1,0 +1,205 @@
+---
+title: CompiledMeasurementSampler
+description: Compiled sampler for efficient measurement outcome sampling
+---
+
+## Overview
+
+The `CompiledMeasurementSampler` class provides GPU-accelerated sampling of measurement outcomes from quantum circuits. It compiles the circuit into an optimized representation using sequential decomposition and autoregressive sampling.
+
+The sampler uses JAX for hardware acceleration and supports batched sampling for improved performance on GPUs.
+
+## Constructor
+
+### `__init__`
+
+```python
+CompiledMeasurementSampler(circuit: Circuit, *, seed: int | None = None)
+```
+
+Create a compiled measurement sampler from a quantum circuit.
+
+<ParamField path="circuit" type="Circuit">
+  The quantum circuit to compile for sampling.
+</ParamField>
+
+<ParamField path="seed" type="int | None" default="None">
+  Random seed for JAX random number generation. If None, a random seed is generated automatically.
+</ParamField>
+
+**Example:**
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+''')
+
+sampler = tsim.CompiledMeasurementSampler(circuit, seed=42)
+```
+
+<Note>
+  The compilation process may take some time for large circuits, but the resulting sampler can generate samples very efficiently.
+</Note>
+
+## Methods
+
+### `sample`
+
+```python
+sample(shots: int, *, batch_size: int = 1024) -> np.ndarray
+```
+
+Sample measurement outcomes from the compiled circuit.
+
+<ParamField path="shots" type="int">
+  The number of times to sample every measurement in the circuit.
+</ParamField>
+
+<ParamField path="batch_size" type="int" default="1024">
+  The number of samples to process in each batch. When using a GPU, it is recommended to increase this value until VRAM is fully utilized for maximum performance.
+</ParamField>
+
+<ResponseField name="returns" type="numpy.ndarray">
+  A numpy array of shape `(shots, num_measurements)` containing boolean measurement outcomes. Each row represents one shot, and each column represents one measurement in the circuit.
+</ResponseField>
+
+**Example:**
+
+```python
+import tsim
+import numpy as np
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+''')
+
+sampler = tsim.CompiledMeasurementSampler(circuit, seed=42)
+samples = sampler.sample(shots=10000, batch_size=2048)
+
+print(samples.shape)  # (10000, 2)
+print(samples.dtype)  # bool
+
+# Verify Bell state correlations
+print(np.mean(samples[:, 0] == samples[:, 1]))  # Should be ~1.0
+```
+
+## Performance Optimization
+
+### Batch Size Tuning
+
+The `batch_size` parameter controls the trade-off between memory usage and computational efficiency:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0 1 2 3 4
+    CNOT 0 1 1 2 2 3 3 4
+    M 0 1 2 3 4
+''')
+
+sampler = tsim.CompiledMeasurementSampler(circuit)
+
+# Small batch size - lower memory, less efficient
+samples = sampler.sample(shots=100000, batch_size=512)
+
+# Large batch size - higher memory, more efficient on GPU
+samples = sampler.sample(shots=100000, batch_size=4096)
+```
+
+<Tip>
+  For GPU acceleration, start with `batch_size=1024` and increase until you see diminishing returns or run out of VRAM. Typical values range from 1024 to 8192.
+</Tip>
+
+### Compilation Statistics
+
+The sampler's string representation provides useful compilation statistics:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    T 0
+    CNOT 0 1
+    M 0 1
+''')
+
+sampler = tsim.CompiledMeasurementSampler(circuit)
+print(sampler)
+# CompiledMeasurementSampler(4 graphs, 0 error channel bits, 2 outputs for largest cc, 
+#                            ≤ 3 parameters, 8 A terms, 4 B terms, 2 C terms, 0 D terms, 1.2 kB)
+```
+
+The statistics show:
+- **graphs**: Number of compiled ZX graphs
+- **error channel bits**: Number of noise parameters
+- **outputs for largest cc**: Maximum outputs in any connected component
+- **parameters**: Maximum number of parameters in any compiled graph
+- **A/B/C/D terms**: Counts of different term types in the compiled representation
+- **Memory**: Total memory used by compiled data structures
+
+## Usage with Noise
+
+The sampler automatically handles noisy circuits:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    DEPOLARIZE1(0.01) 0
+    CNOT 0 1
+    DEPOLARIZE2(0.02) 0 1
+    M 0 1
+''')
+
+sampler = tsim.CompiledMeasurementSampler(circuit, seed=42)
+samples = sampler.sample(shots=10000)
+
+# Samples include the effects of noise
+print(samples.shape)  # (10000, 2)
+```
+
+## Alternative: Quick Sampling
+
+For convenience, you can also use the `compile_sampler` method directly on circuits:
+
+```python
+import tsim
+
+circuit = tsim.Circuit('''
+    H 0
+    CNOT 0 1
+    M 0 1
+''')
+
+# Equivalent to CompiledMeasurementSampler(circuit, seed=42)
+sampler = circuit.compile_sampler(seed=42)
+samples = sampler.sample(shots=1000)
+```
+
+## Technical Details
+
+### Sequential Decomposition
+
+The sampler uses sequential decomposition `[0, 1, 2, ..., n]` where:
+- `compiled_scalar_graphs[0]`: Normalization (0 outputs plugged in)
+- `compiled_scalar_graphs[i]`: Cumulative probability up to bit i
+
+This enables efficient autoregressive sampling where each measurement bit is sampled conditioned on all previous bits.
+
+### Hardware Acceleration
+
+The sampler leverages JAX for automatic hardware acceleration:
+- **CPU**: Uses optimized vectorized operations
+- **GPU**: Automatically utilizes CUDA for parallel sampling
+- **TPU**: Supports TPU acceleration when available
+
+No code changes are needed - JAX automatically selects the best available hardware.

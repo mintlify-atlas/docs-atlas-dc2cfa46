@@ -1,0 +1,94 @@
+---
+title: Installation
+description: Install tsim using pip, uv, or with GPU acceleration support
+---
+
+tsim is available as a Python package and can be installed using pip or uv. For GPU acceleration, additional CUDA dependencies can be installed.
+
+## Requirements
+
+- Python 3.10 or higher
+- For GPU acceleration: CUDA 12 or CUDA 13 compatible hardware
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="pip">
+    Install tsim using pip:
+
+    ```bash
+    pip install bloqade-tsim
+    ```
+
+    This installs the CPU-only version of tsim with all required dependencies including JAX, NumPy, and Stim.
+  </Tab>
+
+  <Tab title="uv">
+    Install tsim using [uv](https://docs.astral.sh/uv/) (recommended for faster installation):
+
+    ```bash
+    uv add bloqade-tsim
+    ```
+
+    uv provides faster dependency resolution and installation compared to pip.
+  </Tab>
+</Tabs>
+
+## GPU Acceleration
+
+For significantly faster sampling on machines with NVIDIA GPUs, install tsim with CUDA support.
+
+<Note>
+  GPU acceleration can provide substantial performance improvements for large circuits or high shot counts.
+</Note>
+
+<Tabs>
+  <Tab title="CUDA 13">
+    For systems with CUDA 13 (recommended):
+
+    ```bash
+    pip install "bloqade-tsim[cuda13]"
+    ```
+
+    This installs JAX with CUDA 13 support (requires JAX >= 0.6.0).
+  </Tab>
+
+  <Tab title="CUDA 12">
+    For systems with CUDA 12:
+
+    ```bash
+    pip install "bloqade-tsim[cuda12]"
+    ```
+
+    This installs JAX with CUDA 12 support (requires JAX >= 0.4.38).
+  </Tab>
+</Tabs>
+
+<Warning>
+  Make sure your system has the appropriate CUDA drivers installed before installing the GPU-accelerated version. Check your CUDA version with `nvidia-smi`.
+</Warning>
+
+## Verify Installation
+
+After installation, verify that tsim is working correctly:
+
+```python
+import tsim
+
+print(tsim.__version__)
+
+# Create a simple circuit
+c = tsim.Circuit("""
+    H 0
+    CNOT 0 1
+    M 0 1
+""")
+
+print(f"Circuit has {c.num_qubits} qubits")
+```
+
+If the import succeeds and you can create circuits, tsim is installed correctly.
+
+## Next Steps
+
+Now that you have tsim installed, check out the [Quickstart](/quickstart) guide to learn how to use it.

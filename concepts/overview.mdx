@@ -1,0 +1,190 @@
+---
+title: 'Architecture Overview'
+description: 'Understanding how tsim works under the hood'
+---
+
+## What is tsim?
+
+tsim is a GPU-accelerated quantum circuit sampler that extends [Stim](https://github.com/quantumlib/Stim)'s capabilities to support non-Clifford gates. While Stim can only simulate Clifford circuits efficiently, tsim handles Clifford+T circuits and arbitrary rotation gates through a sophisticated compilation pipeline based on ZX-calculus and stabilizer rank decomposition.
+
+<Note>
+tsim is based on the algorithm described in [Sutcliffe and Kissinger (2025)](https://arxiv.org/abs/2403.06777), which combines ZX-calculus simplification with stabilizer rank decomposition for efficient quantum circuit sampling.
+</Note>
+
+## Core Architecture
+
+tsim's architecture consists of four main stages:
+
+<CardGroup cols={2}>
+  <Card title="Parsing" icon="code">
+    Convert circuit text into ZX-calculus graph representation
+  </Card>
+  <Card title="Graph Preparation" icon="diagram-project">
+    Build sampling graph by composing with adjoint and applying simplifications
+  </Card>
+  <Card title="Decomposition" icon="scissors">
+    Decompose non-Clifford elements using stabilizer rank decomposition
+  </Card>
+  <Card title="Compilation" icon="microchip">
+    Compile into JAX-compatible data structures for GPU execution
+  </Card>
+</CardGroup>
+
+### Stage 1: Parsing and Graph Construction
+
+When you create a `Circuit`, tsim parses the program text and converts each gate into its ZX-calculus representation. The ZX-calculus is a graphical language for reasoning about quantum computations, where:
+
+- **Green spiders** (Z-spiders) represent Z-basis operations
+- **Red spiders** (X-spiders) represent X-basis operations  
+- **Edges** represent quantum wires connecting operations
+- **Phases** on spiders represent rotation angles
+
+For example, a Hadamard gate is represented as a connection between a Z-spider and X-spider, while a CNOT becomes a pair of connected spiders.
+
+<Info>
+Non-Clifford gates like `T`, `R_X`, `R_Y`, `R_Z`, and `U3` are encoded using tagged identity gates in the underlying Stim circuit, then converted to their ZX-graph representations during parsing.
+</Info>
+
+### Stage 2: Graph Preparation
+
+To enable sampling from measurement probabilities, tsim constructs a **sampling graph** (`graph.py:146`):
+
+1. **Compose with adjoint**: The circuit graph is composed with its adjoint (complex conjugate transpose), effectively computing $|\langle \psi | \psi \rangle|^2$ for probability calculations
+
+2. **Add output vertices**: Boundary vertices are added for measurements, detectors, or observables depending on the sampling mode
+
+3. **ZX-calculus simplification**: Apply `zx.full_reduce()` to simplify the graph using graph rewrite rules that preserve the quantum computation while reducing complexity
+
+4. **Error basis transformation**: Phase parameters representing noise channels are transformed from the original error basis (e-variables) to a reduced basis (f-variables) via Gaussian elimination (`graph.py:253`). This reduces the number of parameters needed during evaluation.
+
+```python
+# From graph.py:442
+def prepare_graph(circuit: Circuit, *, sample_detectors: bool) -> SamplingGraph:
+    """Prepare a circuit for compilation."""
+    built = parse_stim_circuit(circuit._stim_circ)
+    
+    # Build sampling graph (compose with adjoint, add outputs)
+    graph = build_sampling_graph(built, sample_detectors=sample_detectors)
+    
+    # Simplify using ZX-calculus rewrite rules
+    zx.full_reduce(graph, paramSafe=True)
+    squash_graph(graph)
+    
+    # Transform error basis: e-params → f-params
+    graph, error_transform = transform_error_basis(graph, num_e=built.num_error_bits)
+    
+    return SamplingGraph(
+        graph=graph,
+        error_transform=error_transform,
+        channel_probs=built.channel_probs,
+        num_outputs=len(graph.outputs()),
+        num_detectors=len(built.detectors),
+    )
+```
+
+### Stage 3: Stabilizer Rank Decomposition
+
+The prepared graph may contain non-Clifford elements (T gates or arbitrary rotations). These are handled via **stabilizer rank decomposition** (`stabrank.py:52`):
+
+1. **U3 decomposition**: First, remove any U3 gates by decomposing them into sums of simpler terms
+
+2. **Magic state decomposition**: T gates are decomposed using the Bravyi-Smith-Smolin (BSS) decomposition, which expresses a T gate as a sum of Clifford circuits weighted by different amplitudes
+
+3. **Recursive decomposition**: This process continues recursively until all non-Clifford elements are removed, producing a sum of purely Clifford (stabilizer) graphs
+
+The result is a **sum of stabilizer components** where each component can be evaluated efficiently.
+
+<Note>
+The number of terms in the stabilizer rank decomposition grows exponentially with the number of non-Clifford gates. This is why tsim can handle "hundreds of qubits, as long as the circuit does not have too many non-Clifford instructions" (README:75-76).
+</Note>
+
+### Stage 4: Compilation to JAX
+
+The final stage compiles the decomposed graphs into JAX-compatible arrays for efficient GPU execution:
+
+1. **Component splitting**: The graph is split into connected components, allowing independent sampling (`pipeline.py:45`)
+
+2. **Output plugging**: For each component, create graphs with different numbers of outputs "plugged" (fixed to basis states) to enable autoregressive sampling (`pipeline.py:161`)
+
+3. **Scalar compilation**: Each stabilizer graph (now containing only scalar terms and phases) is compiled into static-shaped JAX arrays (`compile.py:60`)
+
+The compiled representation stores phase terms in several categories:
+- **Type A**: Node terms $(1 + e^{i\alpha})$
+- **Type B**: Half-pi terms $e^{i\beta}$ where $\beta$ is a multiple of $\pi/2$
+- **Type C**: Pi-pair terms $e^{i\Psi\Phi}$
+- **Type D**: Phase pairs $(1 + e^a + e^b - e^{a+b})$
+
+## Sampling Execution
+
+Once compiled, the sampler uses **autoregressive sampling** to generate measurement outcomes:
+
+1. **Error sampling**: Sample error bits from noise channels based on their probabilities
+
+2. **Component evaluation**: For each connected component, use the compiled circuits to compute conditional probabilities $P(m_i | m_0, \ldots, m_{i-1})$
+
+3. **Sequential sampling**: Sample each output bit sequentially using the conditional probabilities
+
+4. **Exact arithmetic**: All probability computations use exact dyadic arithmetic (powers of 2 and roots of unity) to maintain numerical accuracy
+
+The autoregressive approach means we sample $m_0$, then $m_1 | m_0$, then $m_2 | m_0, m_1$, and so on. The "plugged outputs" from the compilation stage correspond to fixing earlier measurement outcomes.
+
+## Key Differences from Stim
+
+<AccordionGroup>
+  <Accordion title="Non-Clifford gate support">
+    tsim supports T gates, T†, and arbitrary rotation gates (R_X, R_Y, R_Z, U3), while Stim only handles Clifford gates.
+  </Accordion>
+  
+  <Accordion title="Actual vs. reference samples">
+    tsim returns actual detector samples, whereas Stim returns detection *flips* (samples XORed with a noiseless reference). This is necessary because tsim supports non-deterministic detectors.
+  </Accordion>
+  
+  <Accordion title="Compilation strategy">
+    Stim uses tableau simulation for Clifford gates. tsim uses ZX-calculus simplification and stabilizer rank decomposition, which is more general but scales exponentially with the number of non-Clifford gates.
+  </Accordion>
+  
+  <Accordion title="GPU acceleration">
+    tsim compiles to JAX arrays that can run on GPU, while Stim is primarily CPU-based.
+  </Accordion>
+</AccordionGroup>
+
+## Performance Characteristics
+
+### Scaling Behavior
+
+- **Qubit count**: tsim can handle hundreds of qubits efficiently (limited by memory)
+- **Circuit depth**: Linear scaling with depth (each layer adds constant overhead)
+- **Non-Clifford gates**: Exponential scaling with the number of T gates or rotation gates
+- **Noise channels**: Linear scaling with number of error locations
+
+### When to Use tsim
+
+tsim is ideal for:
+
+✅ Circuits with a moderate number of non-Clifford gates (< 30 T-gates)
+✅ Sampling tasks requiring GPU acceleration
+✅ Circuits mixing Clifford and non-Clifford operations
+✅ Non-deterministic detectors or observables
+
+Consider alternatives for:
+
+❌ Pure Clifford circuits (use Stim instead - it's faster)
+❌ Circuits with 50+ T gates (stabilizer rank becomes prohibitive)
+❌ Statevector simulation needs (tsim focuses on sampling)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="ZX-Calculus" icon="diagram-project" href="/concepts/zx-calculus">
+    Learn about the graphical language underlying tsim
+  </Card>
+  <Card title="Stabilizer Rank" icon="layer-group" href="/concepts/stabilizer-rank">
+    Understand how non-Clifford gates are decomposed
+  </Card>
+  <Card title="Non-Clifford Gates" icon="calculator" href="/concepts/non-clifford-gates">
+    See what gates tsim supports beyond Clifford
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/circuit">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

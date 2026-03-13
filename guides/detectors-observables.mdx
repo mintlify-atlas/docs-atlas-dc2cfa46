@@ -1,0 +1,505 @@
+---
+title: "Detectors and Observables"
+description: "Working with quantum error correction primitives in tsim"
+---
+
+## Overview
+
+Detectors and observables are fundamental primitives for quantum error correction (QEC). tsim extends Stim's detector framework to support non-Clifford gates and non-deterministic measurements.
+
+This guide covers how to define, sample, and work with detectors and observables in tsim.
+
+## Detectors
+
+### What is a Detector?
+
+A detector is a parity measurement that should be deterministic under noiseless execution. Detectors are used to identify errors in quantum error correction codes.
+
+### Defining Detectors
+
+Detectors reference measurement records using `rec[-i]` notation:
+
+```python
+import tsim
+
+c = tsim.Circuit("""
+    # Prepare Bell pair
+    H 0
+    CNOT 0 1
+    
+    # Measure both qubits
+    M 0 1
+    
+    # Detector: parity should be even (0 XOR 0 = 0 or 1 XOR 1 = 0)
+    DETECTOR rec[-1] rec[-2]
+""")
+
+sampler = c.compile_detector_sampler(seed=42)
+samples = sampler.sample(shots=100)
+print(samples.shape)  # (100, 1) - one detector
+```
+
+### Multi-Qubit Detectors
+
+Detectors can involve arbitrary numbers of measurements:
+
+```python
+c = tsim.Circuit("""
+    H 0 1 2
+    CNOT 0 1
+    CNOT 1 2
+    M 0 1 2
+    
+    # Three-way parity check
+    DETECTOR rec[-1] rec[-2] rec[-3]
+""")
+```
+
+### Time-Separated Detectors
+
+Detectors can reference measurements from different time steps:
+
+```python
+c = tsim.Circuit("""
+    # First round of measurements
+    H 0
+    M 0
+    
+    # Second round
+    H 0
+    M 0
+    
+    # Detector compares measurements across time
+    DETECTOR rec[-1] rec[-2]
+""")
+```
+
+## Observables
+
+### Logical Observables
+
+Observables represent logical qubit measurements in error correction codes:
+
+```python
+c = tsim.Circuit("""
+    X 0
+    M 0
+    
+    # Observable index 0 (logical qubit 0 X-basis measurement)
+    OBSERVABLE_INCLUDE(0) rec[-1]
+""")
+
+sampler = c.compile_detector_sampler(seed=42)
+
+# Sample detectors and observables separately
+det_samples, obs_samples = sampler.sample(
+    shots=100,
+    separate_observables=True
+)
+
+print(det_samples.shape)  # (100, 0) - no detectors
+print(obs_samples.shape)  # (100, 1) - one observable
+```
+
+### Multiple Observables
+
+Define multiple logical qubits with different observable indices:
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    CNOT 0 1
+    M 0 1
+    
+    # Logical qubit 0: measure in X basis
+    OBSERVABLE_INCLUDE(0) rec[-1] rec[-2]
+    
+    # Logical qubit 1: measure in Z basis  
+    OBSERVABLE_INCLUDE(1) rec[-2]
+""")
+
+print(c.num_observables)  # 2
+```
+
+### Accumulating Observable Contributions
+
+Observables can be built up over multiple measurements:
+
+```python
+c = tsim.Circuit("""
+    H 0 1 2
+    M 0
+    OBSERVABLE_INCLUDE(0) rec[-1]
+    
+    M 1
+    OBSERVABLE_INCLUDE(0) rec[-1]  # Add to same observable
+    
+    M 2
+    OBSERVABLE_INCLUDE(0) rec[-1]  # Add again
+""")
+
+# Observable 0 = parity of all three measurements
+```
+
+## Detector Sampling
+
+### Sample Format
+
+Detector samples are boolean arrays:
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    M 0 1
+    DETECTOR rec[-1] rec[-2]
+""")
+
+sampler = c.compile_detector_sampler(seed=42)
+samples = sampler.sample(shots=5)
+
+print(samples)
+# Output:
+# [[False]
+#  [True]
+#  [False]
+#  [False]
+#  [True]]
+```
+
+### Output Ordering
+
+Control how detectors and observables are arranged in output:
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    M 0 1
+    DETECTOR rec[-1]
+    DETECTOR rec[-2]
+    OBSERVABLE_INCLUDE(0) rec[-1] rec[-2]
+""")
+
+sampler = c.compile_detector_sampler(seed=42)
+
+# Detectors only (default)
+det_only = sampler.sample(shots=100)
+print(det_only.shape)  # (100, 2)
+
+# Detectors, then observables
+det_obs = sampler.sample(shots=100, append_observables=True)
+print(det_obs.shape)  # (100, 3)
+
+# Observables, then detectors
+obs_det = sampler.sample(shots=100, prepend_observables=True)
+print(obs_det.shape)  # (100, 3)
+
+# Separate arrays
+det, obs = sampler.sample(shots=100, separate_observables=True)
+print(det.shape, obs.shape)  # (100, 2) (100, 1)
+```
+
+### Bit-Packed Output
+
+For memory efficiency with many detectors:
+
+```python
+samples = sampler.sample(shots=100000, bit_packed=True)
+print(samples.dtype)  # uint8
+# Each byte stores 8 detector outcomes
+```
+
+## Non-Deterministic Detectors
+
+<Warning>
+tsim allows detectors to be non-deterministic (involving non-Clifford gates), unlike Stim.
+</Warning>
+
+### Example with T Gates
+
+```python
+c = tsim.Circuit("""
+    H 0
+    T 0      # Non-Clifford gate
+    M 0
+    DETECTOR rec[-1]  # Non-deterministic detector
+""")
+
+sampler = c.compile_detector_sampler(seed=42)
+samples = sampler.sample(shots=1000)
+
+# Detector fires probabilistically even without noise
+fire_rate = samples.mean()
+print(f"Detector fires {fire_rate*100:.1f}% of time")
+```
+
+### tsim vs Stim Semantics
+
+Recall the key difference:
+
+<CodeGroup>
+```python tsim (actual values)
+import tsim
+
+c = tsim.Circuit("""
+    X 0
+    M 0  
+    DETECTOR rec[-1]
+""")
+
+samples = c.compile_detector_sampler().sample(100)
+print(samples[0])  # [True] - actual detector value
+```
+
+```python Stim (flips)
+import stim
+
+c = stim.Circuit("""
+    X 0
+    M 0
+    DETECTOR rec[-1]  
+""")
+
+samples = c.compile_detector_sampler().sample(100)
+print(samples[0])  # [False] - flip compared to reference
+```
+</CodeGroup>
+
+## Detector Coordinates
+
+Attach spatial/temporal coordinates to detectors for visualization:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    M 0
+    DETECTOR(0, 0, 0) rec[-1]  # (x, y, t) coordinates
+    
+    H 1
+    M 1
+    DETECTOR(1, 0, 0) rec[-1]  # Adjacent detector
+""")
+```
+
+## Error Correction Workflow
+
+### Complete Example
+
+Typical quantum error correction pipeline:
+
+<Steps>
+  <Step title="Define QEC circuit with noise">
+    ```python
+    c = tsim.Circuit("""
+        # Prepare logical |0>
+        H 0 1 2
+        
+        # Add noise
+        DEPOLARIZE1(0.01) 0 1 2
+        
+        # Measure syndrome
+        CNOT 0 1
+        CNOT 1 2
+        M 1
+        DETECTOR rec[-1]
+        
+        # Measure logical observable
+        M 0 2
+        OBSERVABLE_INCLUDE(0) rec[-1] rec[-2]
+    """)
+    ```
+  </Step>
+  
+  <Step title="Sample detector and observable outcomes">
+    ```python
+    sampler = c.compile_detector_sampler(seed=42)
+    det_samples, obs_samples = sampler.sample(
+        shots=10000,
+        separate_observables=True
+    )
+    ```
+  </Step>
+  
+  <Step title="Decode errors">
+    ```python
+    import pymatching
+    
+    # Get detector error model
+    dem = c.detector_error_model()
+    
+    # Create decoder
+    matcher = pymatching.Matching.from_detector_error_model(dem)
+    
+    # Decode
+    predictions = matcher.decode_batch(det_samples)
+    ```
+  </Step>
+  
+  <Step title="Calculate logical error rate">
+    ```python
+    import numpy as np
+    
+    # Uncorrected errors
+    uncorrected_errors = np.count_nonzero(obs_samples)
+    
+    # Corrected errors
+    corrected = np.logical_xor(obs_samples, predictions)
+    corrected_errors = np.count_nonzero(corrected)
+    
+    print(f"Uncorrected: {uncorrected_errors/10000:.3%}")
+    print(f"Corrected: {corrected_errors/10000:.3%}")
+    ```
+  </Step>
+</Steps>
+
+### With Stim-Generated Codes
+
+Combine tsim with Stim's code generators:
+
+```python
+import stim
+import tsim
+
+# Generate surface code circuit with Stim
+stim_circ = stim.Circuit.generated(
+    "surface_code:rotated_memory_x",
+    distance=5,
+    rounds=10,
+    after_clifford_depolarization=0.001
+)
+
+# Convert to tsim (optionally add non-Clifford gates)
+tsim_circ = tsim.Circuit.from_stim_program(stim_circ)
+
+# Sample
+sampler = tsim_circ.compile_detector_sampler(seed=42)
+det_samples, obs_samples = sampler.sample(
+    shots=100000,
+    separate_observables=True,
+    batch_size=4096  # GPU optimization
+)
+```
+
+## Detector Error Models
+
+### Generating DEMs
+
+Extract detector error models for decoding:
+
+```python
+c = tsim.Circuit("""
+    H 0
+    DEPOLARIZE1(0.001) 0
+    M 0
+    DETECTOR rec[-1]
+""")
+
+# Generate DEM
+dem = c.detector_error_model()
+print(dem)
+```
+
+### DEM Options
+
+```python
+dem = c.detector_error_model(
+    decompose_errors=False,          # Don't decompose into graphlike errors
+    flatten_loops=False,             # Preserve REPEAT blocks
+    allow_gauge_detectors=False,     # Verify determinism
+    approximate_disjoint_errors=0.01 # Approximate disjoint errors
+)
+```
+
+<Note>
+tsim's `detector_error_model()` allows non-deterministic observables, unlike Stim. Set `allow_gauge_detectors=False` to verify that detectors are deterministic.
+</Note>
+
+## Advanced Patterns
+
+### Measurement-Free Detectors
+
+Detectors can also reference MPP (Pauli product measurements):
+
+```python
+c = tsim.Circuit("""
+    H 0 1
+    CZ 0 1
+    
+    # Measure ZZ parity without destroying state
+    MPP Z0*Z1
+    DETECTOR rec[-1]
+    
+    # Continue with circuit
+    H 0 1
+    M 0 1
+""")
+```
+
+### Inverted Detectors
+
+Use `!` to invert the parity:
+
+```python
+c = tsim.Circuit("""
+    X 0
+    M 0
+    DETECTOR !rec[-1]  # Expect 1, detector fires if 0
+""")
+```
+
+### Temporal Detectors
+
+Track consistency across rounds:
+
+```python
+c = tsim.Circuit("""
+    # Round 1
+    H 0
+    M 0
+    
+    TICK  # Time boundary
+    
+    # Round 2  
+    H 0
+    M 0
+    
+    # Detector compares rounds
+    DETECTOR rec[-1] rec[-2]
+""")
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Name Detectors" icon="tag">
+    Use `DETECTOR(x, y, t)` coordinates for clarity and debugging.
+  </Card>
+  
+  <Card title="Verify Determinism" icon="check">
+    Test noiseless circuits to ensure detectors are deterministic (if using Clifford-only).
+  </Card>
+  
+  <Card title="Separate Concerns" icon="layer-group">
+    Use `separate_observables=True` to keep syndrome and logical data distinct.
+  </Card>
+  
+  <Card title="Batch Efficiently" icon="gauge">
+    Use large `batch_size` for detector sampling on GPUs.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Noise Models" icon="wave-pulse" href="/guides/noise-models">
+    Add realistic noise to your QEC circuits
+  </Card>
+  <Card title="Stim Compatibility" icon="link" href="/guides/stim-compatibility">
+    Understand differences from Stim's detector semantics
+  </Card>
+  <Card title="Noise Models" icon="shield" href="/guides/noise-models">
+    Learn about noise models and error simulation
+  </Card>
+  <Card title="PyMatching" icon="external-link" href="https://pymatching.readthedocs.io">
+    Decode detection events with PyMatching
+  </Card>
+</CardGroup>
