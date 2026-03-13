@@ -1,0 +1,107 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "tsim",
+  "projectDescription": "GPU-accelerated quantum circuit sampler using ZX-calculus stabilizer rank decomposition with support for non-Clifford gates.",
+  "theme": "aspen",
+  "primaryColor": "#b21e1e",
+  "lightColor": "#e59f82",
+  "darkColor": "#e0dbd9",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/zx-calculus",
+              "concepts/stabilizer-rank",
+              "concepts/non-clifford-gates"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/basic-usage",
+              "guides/stim-compatibility",
+              "guides/gpu-acceleration",
+              "guides/detectors-observables",
+              "guides/noise-models"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/encoding-demo",
+              "examples/magic-state-distillation",
+              "examples/migration-guide"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/circuit",
+              "api/compiled-measurement-sampler",
+              "api/compiled-detector-sampler"
+            ]
+          },
+          {
+            "group": "Compilation",
+            "pages": [
+              "api/compilation/pipeline",
+              "api/compilation/evaluate"
+            ]
+          },
+          {
+            "group": "Noise",
+            "pages": [
+              "api/noise/channels",
+              "api/noise/detector-error-model"
+            ]
+          },
+          {
+            "group": "Graph Operations",
+            "pages": [
+              "api/graph/graph-construction",
+              "api/graph/types"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "GPU-accelerated quantum circuit sampling",
+    "Support for Clifford+T circuits with non-Clifford gates (T, T_DAG, R_X, R_Y, R_Z, U3)",
+    "Stim-compatible API with extended gate support",
+    "ZX-calculus based stabilizer rank decomposition",
+    "Pauli noise channel support",
+    "Detector and observable sampling",
+    "JAX-based compilation for CPU and GPU"
+  ],
+  "publicApiSurface": [
+    "Circuit",
+    "Circuit.compile_sampler()",
+    "Circuit.compile_detector_sampler()",
+    "Circuit.detector_error_model()",
+    "Circuit.diagram()",
+    "CompiledMeasurementSampler",
+    "CompiledMeasurementSampler.sample()",
+    "CompiledDetectorSampler",
+    "CompiledDetectorSampler.sample()"
+  ]
+}
